@@ -41,8 +41,8 @@ def main():
     
     batch_size = 16
     num_epochs = 3
-    learning_rate = 1e-4
-    weight_decay = 1e-100
+    learning_rate = 1e-3  # 大幅提高学习率
+    weight_decay = 1e-5   # 恢复正常weight_decay
     feature_dim = 128
     
     # Early stopping parameters

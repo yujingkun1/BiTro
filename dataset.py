@@ -176,19 +176,30 @@ class HESTSpatialDataset(Dataset):
                         padded_expression[:len(gene_expression)] = gene_expression
                         gene_expression = padded_expression
                     
+                    # Apply log1p transformation to gene expression data
+                    # log1p(x) = log(1+x) is more stable than log(x) for small values
+                    gene_expression = np.log1p(gene_expression)
+                    
                     spot_data['gene_expression'] = gene_expression
                     spot_data['available_genes'] = ordered_genes
                 else:
                     print(f"Warning: spot {spot_idx} has no intersection genes")
-                    spot_data['gene_expression'] = np.zeros(len(self.selected_genes))
+                    # Apply log1p transformation even for zero expression
+                    spot_data['gene_expression'] = np.log1p(np.zeros(len(self.selected_genes)))
                     spot_data['available_genes'] = self.selected_genes
             
-            # Calculate final gene count
+            # Calculate final gene count and verify log transformation
             if self.all_spots_data:
                 self.num_genes = len(self.selected_genes)
                 self.common_genes = self.selected_genes
                 print(f"Final gene count: {self.num_genes}")
                 print(f"Expected gene count: {len(self.selected_genes)}")
+                
+                # Verify log transformation effect
+                all_expressions = np.concatenate([spot['gene_expression'] for spot in self.all_spots_data])
+                print(f"Gene expression after log1p transformation:")
+                print(f"  Range: [{all_expressions.min():.4f}, {all_expressions.max():.4f}]")
+                print(f"  Mean: {all_expressions.mean():.4f}, Std: {all_expressions.std():.4f}")
             else:
                 self.num_genes = len(self.selected_genes)
                 self.common_genes = self.selected_genes

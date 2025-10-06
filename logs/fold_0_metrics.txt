@@ -1,0 +1,7 @@
+=== Evaluation Results ===
+Overall MSE: 375.580292
+Overall Correlation: 0.486421
+Mean Gene Correlation: 0.000000
+Median Gene Correlation: 0.000000
+Mean Spot Correlation: 0.621908
+Median Spot Correlation: 0.648173

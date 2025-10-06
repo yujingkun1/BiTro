@@ -60,8 +60,18 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
                 # Forward pass
                 predictions = model(spot_graphs)
                 
+                # 添加调试信息
+                if batch_idx == 0 and epoch == 0:
+                    print(f"Debug - Batch {batch_idx}:")
+                    print(f"  Predictions shape: {predictions.shape}, range: [{predictions.min():.4f}, {predictions.max():.4f}]")
+                    print(f"  Targets shape: {spot_expressions.shape}, range: [{spot_expressions.min():.4f}, {spot_expressions.max():.4f}]")
+                
+                # Apply log1p transformation to predictions to match the transformed targets
+                # Both predictions and targets should be in the same log-transformed space
+                predictions_log = torch.log1p(predictions)
+                
                 # Calculate loss
-                loss = criterion(predictions, spot_expressions)
+                loss = criterion(predictions_log, spot_expressions)
                 
                 # Check for anomalous values
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -69,26 +79,14 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
                     skip_batch = True
                     skipped_batches += 1
                 else:
-                    # Check if loss requires grad
-                    if not loss.requires_grad:
-                        print(f"Warning: loss does not require grad, recalculating")
-                        # Force recalculation to ensure gradient connection
-                        predictions = model(spot_graphs)
-                        loss = criterion(predictions, spot_expressions)
-                        # Re-check after recalculation
-                        if not loss.requires_grad:
-                            print(f"Error: loss still does not require grad after recalculation")
-                            skip_batch = True
-                            skipped_batches += 1
-                    
-                    if not skip_batch:
-                        # Backward pass
-                        scaler.scale(loss).backward()
+                    # Backward pass
+                    scaler.scale(loss).backward()
             
             if not skip_batch:
                 # Gradient processing and optimizer update
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
+                # 放宽梯度裁剪，允许更大的梯度更新
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
                 scaler.step(optimizer)
                 scaler.update()
                 
@@ -162,12 +160,13 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
     return train_losses, test_losses
 
 
-def setup_optimizer_and_scheduler(model, learning_rate=1e-5, weight_decay=1e-5, num_epochs=60):
+def setup_optimizer_and_scheduler(model, learning_rate=1e-3, weight_decay=1e-5, num_epochs=60):
     """
     Setup optimizer and learning rate scheduler
     """
+    # 大幅提高学习率到1e-3，这是更合理的范围
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-7)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
     
     return optimizer, scheduler
 
