@@ -32,7 +32,17 @@ def get_fold_samples(fold_idx, all_samples=None):
         8: ['TENX29', 'ZEN47', 'ZEN46', 'ZEN45', 'ZEN44'],
         9: ['ZEN43', 'ZEN42', 'ZEN39', 'ZEN38']
     }
-
+    fold_splits = {
+        0: ['TENX152'],
+        1: ['TENX92'],
+        2: ['TENX91'],
+        3: ['TENX90'],
+        4: ['TENX89'],
+        5: ['TENX49'],
+        6: ['TENX92'],
+        7: ['TENX29']
+    }
+    
     test_samples = fold_splits[fold_idx]
     train_samples = []
     for fold, samples in fold_splits.items():
