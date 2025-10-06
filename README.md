@@ -47,11 +47,11 @@ CellViT-inference --config-dir cellVit.yaml
 ```
 #### 2. Extract Cell Features
 ```bash
-python extract_spatial_features_dinov3.py
+python utils/extract_spatial_features_dinov3.py
 ```
 #### 3. Construct Cell Graph of Bulk Data
 ```bash
-python bulk_graph_construction.py
+python utils/bulk_graph_construction.py
 ```
 #### 4. Train the Bulk Model
 ```bash

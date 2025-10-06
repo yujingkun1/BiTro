@@ -42,7 +42,7 @@ def main():
     
     batch_size = 16
     num_epochs = 60
-    learning_rate = 3e-6
+    learning_rate = 1e-4  # 提高学习率从3e-6到1e-4
     weight_decay = 1e-5
     feature_dim = 128
     

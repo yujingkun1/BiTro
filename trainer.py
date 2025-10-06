@@ -75,14 +75,20 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
                         # Force recalculation to ensure gradient connection
                         predictions = model(spot_graphs)
                         loss = criterion(predictions, spot_expressions)
+                        # Re-check after recalculation
+                        if not loss.requires_grad:
+                            print(f"Error: loss still does not require grad after recalculation")
+                            skip_batch = True
+                            skipped_batches += 1
                     
-                    # Backward pass
-                    scaler.scale(loss).backward()
+                    if not skip_batch:
+                        # Backward pass
+                        scaler.scale(loss).backward()
             
             if not skip_batch:
                 # Gradient processing and optimizer update
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=3.0)
                 scaler.step(optimizer)
                 scaler.update()
                 
@@ -90,8 +96,6 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
                 num_batches += 1
                 
                 pbar.set_postfix({'loss': f'{loss.item():.4f}'})
-            else:
-                scaler.update()
         
         pbar.close()
         
@@ -121,6 +125,17 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
         print(f"  Train Loss: {epoch_loss:.6f}, Test Loss: {test_loss:.6f}")
         print(f"  LR: {current_lr:.2e}")
         
+        # 添加梯度范数监控
+        total_grad_norm = 0.0
+        param_count = 0
+        for param in model.parameters():
+            if param.grad is not None:
+                param_norm = param.grad.data.norm(2)
+                total_grad_norm += param_norm.item() ** 2
+                param_count += 1
+        total_grad_norm = total_grad_norm ** (1. / 2)
+        print(f"  Grad Norm: {total_grad_norm:.6f}")
+        
         # Early stopping logic
         if test_loss < best_test_loss - min_delta:
             # Test loss has significant improvement
@@ -147,7 +162,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
     return train_losses, test_losses
 
 
-def setup_optimizer_and_scheduler(model, learning_rate=3e-6, weight_decay=1e-5, num_epochs=60):
+def setup_optimizer_and_scheduler(model, learning_rate=1e-5, weight_decay=1e-5, num_epochs=60):
     """
     Setup optimizer and learning rate scheduler
     """
