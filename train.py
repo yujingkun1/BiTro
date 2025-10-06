@@ -18,6 +18,17 @@ from trainer import train_hest_graph_model, setup_optimizer_and_scheduler, setup
 from utils import get_fold_samples, evaluate_model_metrics, save_evaluation_results, plot_training_curves, setup_device
 
 
+def convert_numpy_types(obj):
+    """Convert numpy types to Python native types for JSON serialization"""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    raise TypeError(f'Object of type {obj.__class__.__name__} is not JSON serializable')
+
+
 def main():
     """Main training workflow - 10-fold cross validation"""
     
@@ -25,25 +36,13 @@ def main():
     hest_data_dir = "/data/yujk/hovernet2feature/HEST/hest_data"
     graph_dir = "/data/yujk/hovernet2feature/hest_graphs_dinov3"
     
-    # All 49 samples (for 10-fold cross validation)
-    all_samples = ['TENX152', 'MISC73', 'MISC72', 'MISC71', 'MISC70',
-                   'MISC69', 'MISC68', 'MISC67', 'MISC66', 'MISC65', 
-                   'MISC64', 'MISC63', 'MISC62', 'MISC58', 'MISC57',
-                   'MISC56', 'MISC51', 'MISC50', 'MISC49', 'MISC48',
-                   'MISC47', 'MISC46', 'MISC45', 'MISC44', 'MISC43',
-                   'MISC42', 'MISC41', 'MISC40', 'MISC39', 'MISC38',
-                   'MISC37', 'MISC36', 'MISC35', 'MISC34', 'MISC33',
-                   'TENX92', 'TENX91', 'TENX90', 'TENX89', 'TENX49',
-                   'TENX29', 'ZEN47', 'ZEN46', 'ZEN45', 'ZEN44',
-                   'ZEN43', 'ZEN42', 'ZEN39', 'ZEN38']
-    
     # Specify gene file
     gene_file = "/data/yujk/hovernet2feature/HEST/tutorials/SA_process/common_genes_misc_tenx_zen_897.txt"
     
     batch_size = 16
-    num_epochs = 60
-    learning_rate = 1e-4  # 提高学习率从3e-6到1e-4
-    weight_decay = 1e-5
+    num_epochs = 3
+    learning_rate = 1e-4
+    weight_decay = 1e-100
     feature_dim = 128
     
     # Early stopping parameters
@@ -57,7 +56,7 @@ def main():
     print("✓ Using direct file reading (no HEST API required)")
     print("✓ Using 897 intersection genes")
     print("✓ Sample-level 10-fold cross validation")
-    print(f"✓ Total samples: {len(all_samples)}")
+    # print(f"✓ Total samples: {len(all_samples)}")
     print(f"✓ Gene file: {gene_file}")
     print(f"✓ Starting from Fold {start_fold + 1}")
     
@@ -91,7 +90,7 @@ def main():
         print(f"{'='*50}")
         
         # Get current fold train and test samples
-        train_samples, test_samples = get_fold_samples(fold_idx, all_samples)
+        train_samples, test_samples = get_fold_samples(fold_idx)
         print(f"Training samples ({len(train_samples)}): {train_samples}")
         print(f"Test samples ({len(test_samples)}): {test_samples}")
         
@@ -201,7 +200,7 @@ def main():
         
         # Save temporary results (in case of interruption)
         with open(temp_results_file, 'w') as f:
-            json.dump(all_fold_results, f, indent=2)
+            json.dump(all_fold_results, f, indent=2, default=convert_numpy_types)
         
         print(f"\n=== Fold {fold_idx + 1} Completed ===")
         print(f"Final test loss: {test_losses[-1] if test_losses else 'N/A'}")
@@ -235,7 +234,7 @@ def main():
     # Save final results
     final_results_file = "./logs/final_10fold_results.json"
     with open(final_results_file, 'w') as f:
-        json.dump(all_fold_results, f, indent=2)
+        json.dump(all_fold_results, f, indent=2, default=convert_numpy_types)
     
     print(f"\nFinal results saved to: {final_results_file}")
     print("Training completed successfully!")
