@@ -21,6 +21,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
     """
     model.to(device)
     criterion = nn.MSELoss()
+    # Use correct GradScaler initialization to avoid API mismatch
     scaler = GradScaler('cuda')
     best_loss = float('inf')
     best_test_loss = float('inf')
@@ -65,13 +66,11 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
                     print(f"Debug - Batch {batch_idx}:")
                     print(f"  Predictions shape: {predictions.shape}, range: [{predictions.min():.4f}, {predictions.max():.4f}]")
                     print(f"  Targets shape: {spot_expressions.shape}, range: [{spot_expressions.min():.4f}, {spot_expressions.max():.4f}]")
+                    print(f"  predictions.requires_grad: {predictions.requires_grad}")
+            
                 
-                # Apply log1p transformation to predictions to match the transformed targets
-                # Both predictions and targets should be in the same log-transformed space
-                predictions_log = torch.log1p(predictions)
-                
-                # Calculate loss
-                loss = criterion(predictions_log, spot_expressions)
+                # Calculate loss in log space: targets are already log1p-transformed
+                loss = criterion(predictions, spot_expressions)
                 
                 # Check for anomalous values
                 if torch.isnan(loss) or torch.isinf(loss):

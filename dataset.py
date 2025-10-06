@@ -72,23 +72,23 @@ class HESTSpatialDataset(Dataset):
         """Load intersection gene list"""
         print("=== Loading intersection gene list ===")
         
-        # Load intersection gene list
+        # Load intersection gene list (preserve order from file!)
         if self.gene_file is None:
             self.gene_file = "/data/yujk/hovernet2feature/HEST/tutorials/SA_process/common_genes_misc_tenx_zen_897.txt"
         
-        # Read intersection gene list
         print(f"Loading intersection gene list from: {self.gene_file}")
-        self.intersection_genes = set()
+        selected_genes_ordered = []
         with open(self.gene_file, 'r') as f:
             for line in f:
                 gene = line.strip()
                 if gene and not gene.startswith('Efficiently') and not gene.startswith('Total') and not gene.startswith('Detection') and not gene.startswith('Samples'):
-                    self.intersection_genes.add(gene)
+                    selected_genes_ordered.append(gene)
         
-        print(f"Intersection genes count: {len(self.intersection_genes)}")
+        # Remove duplicates while preserving order
+        seen = set()
+        self.selected_genes = [g for g in selected_genes_ordered if not (g in seen or seen.add(g))]
+        self.selected_genes_set = set(self.selected_genes)
         
-        # HEST data uses gene names directly, no ENS ID conversion needed
-        self.selected_genes = list(self.intersection_genes)
         print(f"Final genes count: {len(self.selected_genes)}")
     
     def load_hest_data(self):
@@ -97,6 +97,10 @@ class HESTSpatialDataset(Dataset):
         
         self.hest_data = {}
         self.all_spots_data = []
+        
+        # Per-sample cached gene indexers for fast aligned extraction
+        self.sample_gene_indexer = {}
+        self.sample_gene_present_mask = {}
         
         for sample_id in self.sample_ids:
             try:
@@ -128,12 +132,19 @@ class HESTSpatialDataset(Dataset):
                 # Store sample info
                 self.hest_data[sample_id] = sample_info
                 
+                # Build gene indexer aligned to selected_genes order
+                adata_gene_index = pd.Index(adata.var.index)
+                gene_indexer = adata_gene_index.get_indexer(self.selected_genes)
+                present_mask = gene_indexer >= 0
+                self.sample_gene_indexer[sample_id] = gene_indexer
+                self.sample_gene_present_mask[sample_id] = present_mask
+                
                 # Extract spots data
                 adata = sample_info['adata']
                 for spot_idx in range(adata.n_obs):
                     spot_id = adata.obs.index[spot_idx]
                     # Initialize with zero expression (will be updated later)
-                    gene_expression = np.zeros(len(self.selected_genes))
+                    gene_expression = np.zeros(len(self.selected_genes), dtype=np.float32)
                     
                     self.all_spots_data.append({
                         'sample_id': sample_id,
@@ -158,35 +169,32 @@ class HESTSpatialDataset(Dataset):
                 adata = self.hest_data[sample_id]['adata']
                 spot_idx = spot_data['spot_idx']
                 
-                # Get expression data for intersection genes
-                available_genes = set(adata.var.index).intersection(self.intersection_genes)
-                if available_genes:
-                    # Order genes according to specified order
-                    ordered_genes = [g for g in self.selected_genes if g in available_genes]
-                    gene_mask = adata.var.index.isin(ordered_genes)
-                    gene_expression = adata.X[spot_idx, gene_mask]
-                    if hasattr(gene_expression, 'toarray'):
-                        gene_expression = gene_expression.toarray().flatten()
+                # Precomputed mapping from selected_genes -> adata columns
+                gene_indexer = self.sample_gene_indexer[sample_id]
+                present_mask = self.sample_gene_present_mask[sample_id]
+                
+                if present_mask.any():
+                    # Pull values for present genes in one go, aligned to selected_genes order
+                    adata_cols = gene_indexer[present_mask]
+                    # Slice adata row for present genes
+                    values = adata.X[spot_idx, adata_cols]
+                    if hasattr(values, 'toarray'):
+                        values = values.toarray().flatten()
+                    else:
+                        values = np.asarray(values).flatten()
                     
-                    # Ensure consistent dimensions
-                    if len(gene_expression) != len(ordered_genes):
-                        print(f"Warning: spot {spot_idx} gene expression dimension mismatch: {len(gene_expression)} vs {len(ordered_genes)}")
-                        # Pad with zeros to ensure consistent dimensions
-                        padded_expression = np.zeros(len(self.selected_genes))
-                        padded_expression[:len(gene_expression)] = gene_expression
-                        gene_expression = padded_expression
+                    gene_expression = np.zeros(len(self.selected_genes), dtype=np.float32)
+                    gene_expression[present_mask] = values.astype(np.float32)
                     
                     # Apply log1p transformation to gene expression data
-                    # log1p(x) = log(1+x) is more stable than log(x) for small values
-                    gene_expression = np.log1p(gene_expression)
+                    gene_expression = np.log1p(gene_expression).astype(np.float32)
                     
                     spot_data['gene_expression'] = gene_expression
-                    spot_data['available_genes'] = ordered_genes
+                    spot_data['available_genes'] = [self.selected_genes[i] for i, m in enumerate(present_mask) if m]
                 else:
                     print(f"Warning: spot {spot_idx} has no intersection genes")
-                    # Apply log1p transformation even for zero expression
-                    spot_data['gene_expression'] = np.log1p(np.zeros(len(self.selected_genes)))
-                    spot_data['available_genes'] = self.selected_genes
+                    spot_data['gene_expression'] = np.log1p(np.zeros(len(self.selected_genes), dtype=np.float32))
+                    spot_data['available_genes'] = []
             
             # Calculate final gene count and verify log transformation
             if self.all_spots_data:
@@ -209,30 +217,43 @@ class HESTSpatialDataset(Dataset):
             self.common_genes = []
     
     def load_graph_data(self):
-        """Load graph data"""
-        print("Loading graph data...")
-        
-        self.graphs_available = 0
+        """Load graph data (plus_mlp style: use graph_dir, tolerate missing)."""
+        print("Loading graph data (intra-spot only, tolerant to missing)...")
+
+        if not GEOMETRIC_AVAILABLE:
+            raise ImportError("PyTorch Geometric is required for intra-spot graph training but was not found.")
+
+        if self.graph_dir is None:
+            raise ValueError("graph_dir must be provided for loading intra-spot graphs.")
+
+        aggregated_intra_path = os.path.join(self.graph_dir, "hest_intra_spot_graphs.pkl")
+
+        if not os.path.exists(aggregated_intra_path):
+            raise FileNotFoundError(
+                f"Intra-spot graphs file not found: {aggregated_intra_path}")
+
+        try:
+            with open(aggregated_intra_path, 'rb') as f:
+                aggregated_intra = pickle.load(f)  # {sample_id: {spot_idx: Data or dict}}
+            if not isinstance(aggregated_intra, dict):
+                raise ValueError("Loaded intra-spot graphs object must be a dict")
+            print(f"Found aggregated intra-spot graphs: {aggregated_intra_path}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to load aggregated intra graphs: {e}")
+
+        # Store for lookup at __getitem__ time; do not enforce completeness
+        self.intra_spot_graphs = aggregated_intra
+
+        total_spots = len(self.all_spots_data)
+        graphs_available = 0
         for spot_data in self.all_spots_data:
             sample_id = spot_data['sample_id']
-            spot_id = spot_data['spot_id']
-            
-            # Construct graph file path
-            graph_file = os.path.join(self.graph_dir, f"{sample_id}_{spot_id}_graph.pkl")
-            
-            if os.path.exists(graph_file):
-                try:
-                    with open(graph_file, 'rb') as f:
-                        graph_data = pickle.load(f)
-                    spot_data['graph'] = graph_data
-                    self.graphs_available += 1
-                except Exception as e:
-                    print(f"Warning: Failed to load graph for {sample_id}_{spot_id}: {e}")
-                    spot_data['graph'] = None
-            else:
-                spot_data['graph'] = None
-        
-        print(f"Graph data loaded: {self.graphs_available}/{len(self.all_spots_data)} spots")
+            spot_idx = spot_data['spot_idx']
+            if sample_id in self.intra_spot_graphs and isinstance(self.intra_spot_graphs[sample_id], dict) \
+               and spot_idx in self.intra_spot_graphs[sample_id]:
+                graphs_available += 1
+        self.graphs_available = graphs_available
+        print(f"Graph data loaded (intra only): {self.graphs_available}/{total_spots} spots available")
     
     def __len__(self):
         return len(self.all_spots_data)
@@ -243,22 +264,35 @@ class HESTSpatialDataset(Dataset):
         # Get gene expression (target)
         spot_expressions = torch.FloatTensor(spot_data['gene_expression'])
         
-        # Get graph data
-        graph_data = spot_data.get('graph', None)
-        if graph_data is not None and GEOMETRIC_AVAILABLE:
-            # Convert to PyTorch Geometric Data object
-            spot_graph = Data(
-                x=torch.FloatTensor(graph_data['node_features']),
-                edge_index=torch.LongTensor(graph_data['edge_index']),
-                pos=torch.FloatTensor(graph_data.get('positions', [])) if 'positions' in graph_data else None
-            )
+        # Get graph data (lookup from aggregated dict; create empty graph if missing)
+        graph_data = None
+        if hasattr(self, 'intra_spot_graphs'):
+            sample_graphs = self.intra_spot_graphs.get(spot_data['sample_id'])
+            if isinstance(sample_graphs, dict):
+                graph_data = sample_graphs.get(spot_data['spot_idx'])
+
+        if not GEOMETRIC_AVAILABLE:
+            raise ImportError("PyTorch Geometric is required but not available.")
+
+        if graph_data is None:
+            # Create an empty graph consistent with plus_mlp behavior
+            spot_graph = Data(x=torch.zeros(0, self.feature_dim, dtype=torch.float32),
+                              edge_index=torch.empty((2, 0), dtype=torch.long))
+        elif isinstance(graph_data, Data):
+            spot_graph = graph_data
+        elif isinstance(graph_data, dict):
+            x_key = 'x' if 'x' in graph_data else 'node_features'
+            pos_key = 'pos' if 'pos' in graph_data else ('positions' if 'positions' in graph_data else None)
+            if 'edge_index' not in graph_data or x_key not in graph_data:
+                raise KeyError("Graph dict must contain 'edge_index' and 'x' or 'node_features'.")
+            x_tensor = torch.as_tensor(graph_data[x_key], dtype=torch.float32)
+            edge_index_tensor = torch.as_tensor(graph_data['edge_index'], dtype=torch.long)
+            pos_tensor = None
+            if pos_key is not None:
+                pos_tensor = torch.as_tensor(graph_data[pos_key], dtype=torch.float32)
+            spot_graph = Data(x=x_tensor, edge_index=edge_index_tensor, pos=pos_tensor)
         else:
-            # Create empty graph if no graph data available
-            spot_graph = Data(
-                x=torch.zeros(1, self.feature_dim),
-                edge_index=torch.zeros(2, 0, dtype=torch.long),
-                pos=torch.zeros(1, 2)
-            )
+            raise TypeError("Unsupported graph data type; expected PyG Data or dict.")
         
         return {
             'spot_expressions': spot_expressions,

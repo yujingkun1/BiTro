@@ -69,11 +69,9 @@ def evaluate_model(model, data_loader, device):
             # Forward pass
             predictions = model(spot_graphs)
             
-            # Apply log1p transformation to predictions to match the transformed targets
-            predictions_log = torch.log1p(predictions)
-            
-            # Calculate loss
-            loss = criterion(predictions_log, spot_expressions)
+            # Targets are already log1p-transformed in the dataset.
+            # Ensure we compare in the same space without extra log on predictions.
+            loss = criterion(predictions, spot_expressions)
             
             if not (torch.isnan(loss) or torch.isinf(loss)):
                 total_loss += loss.item()
@@ -100,11 +98,8 @@ def evaluate_model_metrics(model, data_loader, device):
             # Forward pass
             predictions = model(spot_graphs)
             
-            # Apply log1p transformation to predictions for consistent evaluation
-            predictions_log = torch.log1p(predictions)
-            
-            # Collect predictions and targets
-            all_predictions.append(predictions_log.cpu().numpy())
+            # Targets are already in log space; keep predictions in the same space
+            all_predictions.append(predictions.cpu().numpy())
             all_targets.append(spot_expressions.cpu().numpy())
     
     # Merge all batch results
