@@ -275,9 +275,11 @@ class HESTSpatialDataset(Dataset):
             raise ImportError("PyTorch Geometric is required but not available.")
 
         if graph_data is None:
-            # Create an empty graph consistent with plus_mlp behavior
-            spot_graph = Data(x=torch.zeros(0, self.feature_dim, dtype=torch.float32),
-                              edge_index=torch.empty((2, 0), dtype=torch.long))
+            # 使用1个占位节点而不是空图，确保梯度能通过模型参数回传（商光凯等原特征能加载了之后把这个删掉）
+            spot_graph = Data(
+                x=torch.zeros(1, self.feature_dim, dtype=torch.float32),
+                edge_index=torch.empty((2, 0), dtype=torch.long)
+            )
         elif isinstance(graph_data, Data):
             spot_graph = graph_data
         elif isinstance(graph_data, dict):

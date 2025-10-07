@@ -154,11 +154,9 @@ class StaticGraphTransformerPredictor(nn.Module):
             # Transformer处理
             transformer_output = self.transformer(node_features)  # [1, seq_len, embed_dim]
             
-            # 聚合为spot级别的表示（使用求和：细胞表达加和=spot表达）
-            spot_representation = transformer_output.sum(dim=1)  # [1, embed_dim]
-            
-            # 预测基因表达
-            gene_prediction = self.output_projection(spot_representation)  # [1, num_genes]
+            # 先根据细胞的特征预测细胞表达，再对细胞的基因表达进行求和
+            cell_gene_predictions = self.output_projection(transformer_output)  # [1, seq_len, num_genes]
+            gene_prediction = cell_gene_predictions.sum(dim=1)  # [1, num_genes]
             batch_outputs.append(gene_prediction)
         
         # 合并批次输出
