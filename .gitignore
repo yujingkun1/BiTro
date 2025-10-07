@@ -1,2 +1,6 @@
 # Ignore all PyTorch checkpoint files
 *.pt
+*.pyc
+*.pyo
+*.pyd
+*__pycache__

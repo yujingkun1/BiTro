@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 HEST细胞深度特征提取器
-使用DINOv2提取每个细胞的深度特征，结合形态特征构建综合特征向量
+使用DINOv3提取每个细胞的深度特征，结合形态特征构建综合特征向量
 """
 
 import os
@@ -206,18 +206,7 @@ class HESTCellFeatureExtractor:
         #     self.dino_model = self.dino_model.half()  # 注释掉强制FP16
         
         self.dino_model.eval()
-        
-        # 预热GPU
-        if torch.cuda.is_available():
-            dummy_input = torch.randn(1, 3, 224, 224, device=self.device, dtype=torch.float32)  # 使用FP32预热
-            with torch.no_grad():
-                try:
-                    _ = self.dino_model(dummy_input)
-                    print("  ✓ GPU预热成功")
-                except Exception as e:
-                    print(f"  警告: GPU预热失败: {e}")
-            torch.cuda.empty_cache()
-        
+          
         print(f"✓ DINOv3模型加载成功，特征维度: {self.dinov3_feature_dim}")
     
     def monitor_resources(self):
@@ -485,7 +474,7 @@ class HESTCellFeatureExtractor:
     def process_sample_with_independent_pca(self, sample_id):
         """处理单个样本，独立训练PCA，提取完直接保存（每例独立PCA版本）"""
         print(f"\n=== 处理空转样本: {sample_id} ===")
-        print("每例独立训练PCA模型，128维DINOv2特征")
+        print("每例独立训练PCA模型，128维DINOv3特征")
         
         # 加载样本数据
         sample_data = self.load_sample_data(sample_id)
@@ -553,8 +542,8 @@ class HESTCellFeatureExtractor:
             print("  无法从WSI中提取真实细胞图像，程序终止")
             raise RuntimeError(f"WSI图像加载失败，无法继续特征提取: {e}") from e
         
-        # 提取DINOv2特征
-        print("提取DINOv2特征...")
+        # 提取DINOv3特征
+        print("提取DINOv3特征...")
         dino_features = self.extract_dino_features(cell_patches)
         
         # 为当前样本独立训练PCA降维（不融合形态特征）
@@ -580,7 +569,7 @@ class HESTCellFeatureExtractor:
         print(f"\n=== 性能统计 ===")
         total_cells = len(cell_patches)
         print(f"✓ 总处理细胞数: {total_cells:,}")
-        print(f"✓ DINOv2批处理大小: {self.dino_batch_size}")
+        print(f"✓ DINOv3批处理大小: {self.dino_batch_size}")
         print(f"✓ 细胞批处理大小: {self.cell_batch_size}")
         print(f"✓ 并行工作者数: {self.num_workers}")
         print(f"✓ 最终特征维度: {self.final_feature_dim} (样本独立PCA)")
@@ -1103,7 +1092,7 @@ def main_independent_pca_extraction():
         print(f"  - Patch大小: {extractor.cell_patch_size}×{extractor.cell_patch_size}像素 (24×24μm)")
         print(f"  - 图像来源: 仅真实WSI细胞图像")
         print(f"  - 输出目录: {output_dir}")
-        print(f"  - 性能优化: DINOv2批大小{extractor.dino_batch_size}, 细胞批大小{extractor.cell_batch_size:,}, 多线程{extractor.num_workers}个")
+        print(f"  - 性能优化: DINOv3批大小{extractor.dino_batch_size}, 细胞批大小{extractor.cell_batch_size:,}, 多线程{extractor.num_workers}个")
         
         print(f"\n📄 样本详细信息:")
         for result in sample_results:
@@ -1145,9 +1134,9 @@ def main_independent_pca_extraction():
 
 
 if __name__ == "__main__":
-    # 运行空转数据独立PCA特征提取（仅DINOv2特征）
-    print("HEST细胞特征提取器 - 仅使用DINOv2特征（独立PCA）")
-    print("特征配置: DINOv2 768维 -> PCA降维至128维")
+    # 运行空转数据独立PCA特征提取（仅DINOv3特征）
+    print("HEST细胞特征提取器 - 仅使用DINOv3特征（独立PCA）")
+    print("特征配置: DINOv3 768维 -> PCA降维至128维")
     print("不包含形态特征，每个样本独立训练PCA")
     print()
     
