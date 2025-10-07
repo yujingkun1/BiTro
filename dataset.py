@@ -275,7 +275,7 @@ class HESTSpatialDataset(Dataset):
             raise ImportError("PyTorch Geometric is required but not available.")
 
         if graph_data is None:
-            # 使用1个占位节点而不是空图，确保梯度能通过模型参数回传（商光凯等原特征能加载了之后把这个删掉）
+            # 使用1个占位节点而不是空图，确保梯度能通过模型参数回传（等原特征能加载了之后把这个删掉）
             spot_graph = Data(
                 x=torch.zeros(1, self.feature_dim, dtype=torch.float32),
                 edge_index=torch.empty((2, 0), dtype=torch.long)

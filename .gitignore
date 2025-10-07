@@ -1,0 +1,2 @@
+# Ignore all PyTorch checkpoint files
+*.pt
