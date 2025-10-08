@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 import os
+import sys
+
+# 允许从项目根目录直接运行：将项目根加入 sys.path
+_current_file_dir = os.path.dirname(os.path.abspath(__file__))
+_project_root = os.path.dirname(_current_file_dir)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from .utils import check_environment_compatibility, load_gene_mapping
-from .dataset import BulkStaticGraphDataset372, collate_fn_bulk_372
-from .models import OptimizedTransformerPredictor
-from .trainer import train_optimized_model
+from bulk_model.utils import check_environment_compatibility, load_gene_mapping
+from bulk_model.dataset import BulkStaticGraphDataset372, collate_fn_bulk_372
+from bulk_model.models import OptimizedTransformerPredictor
+from bulk_model.trainer import train_optimized_model
 
 
 # 与原脚本一致：运行时做一次环境检查

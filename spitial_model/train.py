@@ -6,6 +6,11 @@ author: Jingkun Yu
 """
 
 import os
+import sys
+_current_file_dir = os.path.dirname(os.path.abspath(__file__))
+_project_root = os.path.dirname(_current_file_dir)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 import torch
 from torch.utils.data import DataLoader
 import numpy as np
@@ -13,9 +18,9 @@ import json
 import warnings
 warnings.filterwarnings("ignore")
 
-from dataset import HESTSpatialDataset, collate_fn_hest_graph
-from trainer import train_hest_graph_model, setup_optimizer_and_scheduler, setup_model
-from utils import get_fold_samples, evaluate_model_metrics, save_evaluation_results, plot_training_curves, setup_device
+from spitial_model.dataset import HESTSpatialDataset, collate_fn_hest_graph
+from spitial_model.trainer import train_hest_graph_model, setup_optimizer_and_scheduler, setup_model
+from spitial_model.utils import get_fold_samples, evaluate_model_metrics, save_evaluation_results, plot_training_curves, setup_device
 
 
 def convert_numpy_types(obj):
