@@ -40,6 +40,7 @@ def main():
     # Configuration parameters
     hest_data_dir = "/data/yujk/hovernet2feature/HEST/hest_data"
     graph_dir = "/data/yujk/hovernet2feature/hest_graphs_dinov3"
+    features_dir = "/data/yujk/hovernet2feature/hest_spatial_features_independent_pca_dinov3"
     
     # Specify gene file
     gene_file = "/data/yujk/hovernet2feature/HEST/tutorials/SA_process/common_genes_misc_tenx_zen_897.txt"
@@ -103,6 +104,7 @@ def main():
         train_dataset = HESTSpatialDataset(
             hest_data_dir=hest_data_dir,
             graph_dir=graph_dir,
+            features_dir=features_dir,
             sample_ids=train_samples,  # Only pass training samples
             feature_dim=feature_dim,
             mode='train',
@@ -112,6 +114,7 @@ def main():
         test_dataset = HESTSpatialDataset(
             hest_data_dir=hest_data_dir,
             graph_dir=graph_dir,
+            features_dir=features_dir,
             sample_ids=test_samples,   # Only pass test samples
             feature_dim=feature_dim,
             mode='test',

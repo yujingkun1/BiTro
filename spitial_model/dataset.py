@@ -28,54 +28,60 @@ class HESTSpatialDataset(Dataset):
     """
     HEST Spatial Transcriptomics Dataset for Cell2Gene prediction
     """
-    
-    def __init__(self, 
+
+    def __init__(self,
                  hest_data_dir,
                  graph_dir,
                  sample_ids,
-                 feature_dim=128, 
-                 mode='train', 
+                 features_dir=None,
+                 feature_dim=128,
+                 mode='train',
                  seed=42,
                  gene_file=None):
-        
+
         self.feature_dim = feature_dim
         self.mode = mode
         self.graph_dir = graph_dir
         self.hest_data_dir = hest_data_dir
-        self.sample_ids = sample_ids if isinstance(sample_ids, list) else [sample_ids]
+        self.sample_ids = sample_ids if isinstance(
+            sample_ids, list) else [sample_ids]
+        self.features_dir = features_dir
         self.seed = seed
         self.gene_file = gene_file
-        
+
         print(f"=== Initializing HEST Dataset (mode: {mode}) ===")
         print(f"Sample count: {len(self.sample_ids)}")
         print(f"Sample list: {self.sample_ids}")
-        
+
         # 设置随机种子
         np.random.seed(seed)
         torch.manual_seed(seed)
-        
+
         # 加载基因映射
         self.load_gene_mapping()
-        
+
         # 加载HEST数据
         self.load_hest_data()
-        
+
+        # 加载细胞特征数据（用于无图时直接使用特征）
+        self.load_feature_data()
+
         # 加载图数据
         self.load_graph_data()
-        
+
         print(f"=== Dataset initialization complete ===")
         print(f"Total spots: {len(self.all_spots_data)}")
         print(f"Graph files available: {self.graphs_available}")
         print(f"Genes count: {self.num_genes}")
-    
+
     def load_gene_mapping(self):
         """Load intersection gene list"""
         print("=== Loading intersection gene list ===")
-        
+
         # Load intersection gene list (preserve order from file!)
         if self.gene_file is None:
             self.gene_file = "/data/yujk/hovernet2feature/HEST/tutorials/SA_process/common_genes_misc_tenx_zen_897.txt"
-        
+
         print(f"Loading intersection gene list from: {self.gene_file}")
         selected_genes_ordered = []
         with open(self.gene_file, 'r') as f:
@@ -83,96 +89,105 @@ class HESTSpatialDataset(Dataset):
                 gene = line.strip()
                 if gene and not gene.startswith('Efficiently') and not gene.startswith('Total') and not gene.startswith('Detection') and not gene.startswith('Samples'):
                     selected_genes_ordered.append(gene)
-        
+
         # Remove duplicates while preserving order
         seen = set()
-        self.selected_genes = [g for g in selected_genes_ordered if not (g in seen or seen.add(g))]
+        self.selected_genes = [
+            g for g in selected_genes_ordered if not (g in seen or seen.add(g))]
         self.selected_genes_set = set(self.selected_genes)
-        
+
         print(f"Final genes count: {len(self.selected_genes)}")
-    
+
     def load_hest_data(self):
         """Load HEST data files directly"""
         print("=== Loading HEST data files ===")
-        
+
         self.hest_data = {}
         self.all_spots_data = []
-        
+
         # Per-sample cached gene indexers for fast aligned extraction
         self.sample_gene_indexer = {}
         self.sample_gene_present_mask = {}
-        
+
         for sample_id in self.sample_ids:
             try:
                 print(f"Loading sample: {sample_id}")
-                
+
                 sample_info = {}
-                
+
                 # 1. Load AnnData file
-                st_file = os.path.join(self.hest_data_dir, "st", f"{sample_id}.h5ad")
+                st_file = os.path.join(
+                    self.hest_data_dir, "st", f"{sample_id}.h5ad")
                 if os.path.exists(st_file):
                     adata = sc.read_h5ad(st_file)
                     sample_info['adata'] = adata
-                    print(f"  - AnnData: {adata.n_obs} spots × {adata.n_vars} genes")
+                    print(
+                        f"  - AnnData: {adata.n_obs} spots × {adata.n_vars} genes")
                 else:
                     print(f"  - Warning: AnnData file not found: {st_file}")
                     continue
-                
+
                 # 2. Load metadata
-                metadata_file = os.path.join(self.hest_data_dir, "metadata", f"{sample_id}.json")
+                metadata_file = os.path.join(
+                    self.hest_data_dir, "metadata", f"{sample_id}.json")
                 if os.path.exists(metadata_file):
                     with open(metadata_file, 'r') as f:
                         metadata = json.load(f)
                     sample_info['metadata'] = metadata
-                    print(f"  - Metadata: {metadata.get('tissue', 'unknown')} tissue")
+                    print(
+                        f"  - Metadata: {metadata.get('tissue', 'unknown')} tissue")
                 else:
                     sample_info['metadata'] = {}
-                    print(f"  - Warning: Metadata file not found: {metadata_file}")
-                
+                    print(
+                        f"  - Warning: Metadata file not found: {metadata_file}")
+
                 # Store sample info
                 self.hest_data[sample_id] = sample_info
-                
+
                 # Build gene indexer aligned to selected_genes order
                 adata_gene_index = pd.Index(adata.var.index)
-                gene_indexer = adata_gene_index.get_indexer(self.selected_genes)
+                gene_indexer = adata_gene_index.get_indexer(
+                    self.selected_genes)
                 present_mask = gene_indexer >= 0
                 self.sample_gene_indexer[sample_id] = gene_indexer
                 self.sample_gene_present_mask[sample_id] = present_mask
-                
+
                 # Extract spots data
                 adata = sample_info['adata']
                 for spot_idx in range(adata.n_obs):
                     spot_id = adata.obs.index[spot_idx]
                     # Initialize with zero expression (will be updated later)
-                    gene_expression = np.zeros(len(self.selected_genes), dtype=np.float32)
-                    
+                    gene_expression = np.zeros(
+                        len(self.selected_genes), dtype=np.float32)
+
                     self.all_spots_data.append({
                         'sample_id': sample_id,
                         'spot_idx': spot_idx,
                         'spot_id': spot_id,
                         'gene_expression': gene_expression
                     })
-                
+
             except Exception as e:
                 print(f"  Error loading {sample_id}: {e}")
                 continue
-        
+
         print(f"Successfully loaded {len(self.hest_data)} samples")
         print(f"Total spots loaded: {len(self.all_spots_data)}")
-        
+
         # Update gene expression data with intersection genes
         if self.hest_data:
-            print(f"Using specified {len(self.selected_genes)} intersection genes")
-            
+            print(
+                f"Using specified {len(self.selected_genes)} intersection genes")
+
             for spot_data in self.all_spots_data:
                 sample_id = spot_data['sample_id']
                 adata = self.hest_data[sample_id]['adata']
                 spot_idx = spot_data['spot_idx']
-                
+
                 # Precomputed mapping from selected_genes -> adata columns
                 gene_indexer = self.sample_gene_indexer[sample_id]
                 present_mask = self.sample_gene_present_mask[sample_id]
-                
+
                 if present_mask.any():
                     # Pull values for present genes in one go, aligned to selected_genes order
                     adata_cols = gene_indexer[present_mask]
@@ -182,32 +197,40 @@ class HESTSpatialDataset(Dataset):
                         values = values.toarray().flatten()
                     else:
                         values = np.asarray(values).flatten()
-                    
-                    gene_expression = np.zeros(len(self.selected_genes), dtype=np.float32)
+
+                    gene_expression = np.zeros(
+                        len(self.selected_genes), dtype=np.float32)
                     gene_expression[present_mask] = values.astype(np.float32)
-                    
+
                     # Apply log1p transformation to gene expression data
-                    gene_expression = np.log1p(gene_expression).astype(np.float32)
-                    
+                    gene_expression = np.log1p(
+                        gene_expression).astype(np.float32)
+
                     spot_data['gene_expression'] = gene_expression
-                    spot_data['available_genes'] = [self.selected_genes[i] for i, m in enumerate(present_mask) if m]
+                    spot_data['available_genes'] = [self.selected_genes[i]
+                                                    for i, m in enumerate(present_mask) if m]
                 else:
-                    print(f"Warning: spot {spot_idx} has no intersection genes")
-                    spot_data['gene_expression'] = np.log1p(np.zeros(len(self.selected_genes), dtype=np.float32))
+                    print(
+                        f"Warning: spot {spot_idx} has no intersection genes")
+                    spot_data['gene_expression'] = np.log1p(
+                        np.zeros(len(self.selected_genes), dtype=np.float32))
                     spot_data['available_genes'] = []
-            
+
             # Calculate final gene count and verify log transformation
             if self.all_spots_data:
                 self.num_genes = len(self.selected_genes)
                 self.common_genes = self.selected_genes
                 print(f"Final gene count: {self.num_genes}")
                 print(f"Expected gene count: {len(self.selected_genes)}")
-                
+
                 # Verify log transformation effect
-                all_expressions = np.concatenate([spot['gene_expression'] for spot in self.all_spots_data])
+                all_expressions = np.concatenate(
+                    [spot['gene_expression'] for spot in self.all_spots_data])
                 print(f"Gene expression after log1p transformation:")
-                print(f"  Range: [{all_expressions.min():.4f}, {all_expressions.max():.4f}]")
-                print(f"  Mean: {all_expressions.mean():.4f}, Std: {all_expressions.std():.4f}")
+                print(
+                    f"  Range: [{all_expressions.min():.4f}, {all_expressions.max():.4f}]")
+                print(
+                    f"  Mean: {all_expressions.mean():.4f}, Std: {all_expressions.std():.4f}")
             else:
                 self.num_genes = len(self.selected_genes)
                 self.common_genes = self.selected_genes
@@ -215,18 +238,21 @@ class HESTSpatialDataset(Dataset):
             print("Error: Failed to load any sample data")
             self.num_genes = 0
             self.common_genes = []
-    
+
     def load_graph_data(self):
         """Load graph data (plus_mlp style: use graph_dir, tolerate missing)."""
         print("Loading graph data (intra-spot only, tolerant to missing)...")
 
         if not GEOMETRIC_AVAILABLE:
-            raise ImportError("PyTorch Geometric is required for intra-spot graph training but was not found.")
+            raise ImportError(
+                "PyTorch Geometric is required for intra-spot graph training but was not found.")
 
         if self.graph_dir is None:
-            raise ValueError("graph_dir must be provided for loading intra-spot graphs.")
+            raise ValueError(
+                "graph_dir must be provided for loading intra-spot graphs.")
 
-        aggregated_intra_path = os.path.join(self.graph_dir, "hest_intra_spot_graphs.pkl")
+        aggregated_intra_path = os.path.join(
+            self.graph_dir, "hest_intra_spot_graphs.pkl")
 
         if not os.path.exists(aggregated_intra_path):
             raise FileNotFoundError(
@@ -234,10 +260,13 @@ class HESTSpatialDataset(Dataset):
 
         try:
             with open(aggregated_intra_path, 'rb') as f:
-                aggregated_intra = pickle.load(f)  # {sample_id: {spot_idx: Data or dict}}
+                # {sample_id: {spot_idx: Data or dict}}
+                aggregated_intra = pickle.load(f)
             if not isinstance(aggregated_intra, dict):
-                raise ValueError("Loaded intra-spot graphs object must be a dict")
-            print(f"Found aggregated intra-spot graphs: {aggregated_intra_path}")
+                raise ValueError(
+                    "Loaded intra-spot graphs object must be a dict")
+            print(
+                f"Found aggregated intra-spot graphs: {aggregated_intra_path}")
         except Exception as e:
             raise RuntimeError(f"Failed to load aggregated intra graphs: {e}")
 
@@ -253,18 +282,182 @@ class HESTSpatialDataset(Dataset):
                and spot_idx in self.intra_spot_graphs[sample_id]:
                 graphs_available += 1
         self.graphs_available = graphs_available
-        print(f"Graph data loaded (intra only): {self.graphs_available}/{total_spots} spots available")
-    
+        print(
+            f"Graph data loaded (intra only): {self.graphs_available}/{total_spots} spots available")
+
+    def load_feature_data(self):
+        """Load per-spot cell features/positions from combined_features.npz per sample.
+
+        设计目标：当某个 spot 没有图时，使用该 spot 的细胞特征与坐标构建无边图（edge_index 为空），
+        从而在模型中自动跳过GNN，直接进入Transformer。
+
+        容错实现：尝试多种常见的键结构；若解析失败则记为空，不影响整体训练流程。
+        """
+        import numpy as np
+        # key: (sample_id, spot_idx) -> dict(x: np.ndarray, pos: np.ndarray)
+        self.spot_features_map = {}
+
+        if self.features_dir is None:
+            print("[feature] features_dir not provided, skip loading features")
+            return
+
+        print("=== Loading per-spot cell features for missing-graph fallback ===")
+        for sample_id in self.sample_ids:
+            npz_path = os.path.join(
+                self.features_dir, f"{sample_id}_combined_features.npz")
+            if not os.path.exists(npz_path):
+                print(
+                    f"  - Warning: combined features file not found for sample {sample_id}: {npz_path}")
+                continue
+            try:
+                npz = np.load(npz_path, allow_pickle=True)
+                keys = list(npz.keys())
+                # 优先尝试字典式按 spot 存储
+                # 例如：per_spot -> { spot_idx:int: { 'x': ndarray, 'pos': ndarray } }
+                per_spot = None
+                if 'per_spot' in keys:
+                    try:
+                        per_spot = npz['per_spot'].item()
+                    except Exception:
+                        per_spot = None
+
+                if isinstance(per_spot, dict):
+                    for spot_idx, v in per_spot.items():
+                        try:
+                            x = v.get('x') if isinstance(v, dict) else None
+                            pos = v.get('pos') if isinstance(v, dict) else None
+                            if x is not None and pos is not None and len(x) == len(pos):
+                                self.spot_features_map[(sample_id, int(spot_idx))] = {
+                                    'x': x.astype(np.float32),
+                                    'pos': pos.astype(np.float32)
+                                }
+                        except Exception:
+                            continue
+                    print(f"  - {sample_id}: loaded per_spot features entries: "
+                          f"{sum(1 for k in self.spot_features_map if k[0]==sample_id)}")
+                    continue
+
+                # 退化方案：平铺数据 + 索引映射
+                # 例如：features(N, D), positions(N, 2), spot_ptr(M+1) 或 spot_index(N)
+                feats = None
+                poss = None
+                if 'features' in keys:
+                    feats = npz['features']
+                if 'positions' in keys:
+                    poss = npz['positions']
+                elif 'pos' in keys:
+                    poss = npz['pos']
+                elif 'coords' in keys:
+                    poss = npz['coords']
+
+                # spot_ptr 表示前缀和切分；spot_index 表示每个细胞属于哪个 spot_idx
+                spot_ptr = npz['spot_ptr'] if 'spot_ptr' in keys else None
+                spot_index = npz['spot_index'] if 'spot_index' in keys else None
+
+                if feats is not None and poss is not None:
+                    if spot_ptr is not None:
+                        # 使用 ptr 切分
+                        for si in range(len(spot_ptr) - 1):
+                            s, e = int(spot_ptr[si]), int(spot_ptr[si+1])
+                            if e > s:
+                                self.spot_features_map[(sample_id, si)] = {
+                                    'x': feats[s:e].astype(np.float32),
+                                    'pos': poss[s:e].astype(np.float32)
+                                }
+                        print(
+                            f"  - {sample_id}: built spot features via spot_ptr")
+                    elif spot_index is not None:
+                        # 使用分组索引
+                        from collections import defaultdict
+                        buf_x = defaultdict(list)
+                        buf_p = defaultdict(list)
+                        for i in range(feats.shape[0]):
+                            si = int(spot_index[i])
+                            buf_x[si].append(feats[i])
+                            buf_p[si].append(poss[i])
+                        for si in buf_x:
+                            x = np.stack(buf_x[si], axis=0).astype(np.float32)
+                            p = np.stack(buf_p[si], axis=0).astype(np.float32)
+                            self.spot_features_map[(sample_id, si)] = {
+                                'x': x, 'pos': p}
+                        print(
+                            f"  - {sample_id}: built spot features via spot_index")
+                    else:
+                        print(
+                            f"  - Warning: {sample_id} combined_features lacks spot grouping info; skip")
+                else:
+                    # 如果只有 features，没有 positions，则尝试从 CellViT 分割数据恢复坐标并按最近spot聚合
+                    if feats is not None and poss is None:
+                        try:
+                            import pandas as pd
+                            from shapely import wkb as _wkb
+                            from sklearn.neighbors import KDTree
+                            cellvit_file = os.path.join(
+                                self.hest_data_dir, "cellvit_seg", f"{sample_id}_cellvit_seg.parquet")
+                            if not os.path.exists(cellvit_file):
+                                print(
+                                    f"  - Warning: cellvit parquet not found for {sample_id}: {cellvit_file}")
+                            else:
+                                df = pd.read_parquet(cellvit_file)
+                                if 'geometry' in df.columns:
+                                    xs = np.zeros(len(df), dtype=np.float32)
+                                    ys = np.zeros(len(df), dtype=np.float32)
+                                    for i in range(len(df)):
+                                        try:
+                                            geom = _wkb.loads(
+                                                df.iloc[i]['geometry'])
+                                            c = geom.centroid
+                                            xs[i] = float(c.x)
+                                            ys[i] = float(c.y)
+                                        except Exception:
+                                            xs[i] = 0.0
+                                            ys[i] = 0.0
+                                    positions = np.stack([xs, ys], axis=1)
+                                    adata = self.hest_data[sample_id]['adata']
+                                    spot_coords = np.asarray(
+                                        adata.obsm['spatial'], dtype=np.float32)
+                                    tree = KDTree(spot_coords)
+                                    dists, idxs = tree.query(
+                                        positions, k=1, return_distance=True)
+                                    idxs = idxs.flatten()
+                                    from collections import defaultdict
+                                    buf_x = defaultdict(list)
+                                    buf_p = defaultdict(list)
+                                    for i in range(feats.shape[0]):
+                                        si = int(idxs[i])
+                                        buf_x[si].append(feats[i])
+                                        buf_p[si].append(positions[i])
+                                    for si in buf_x:
+                                        x = np.stack(buf_x[si], axis=0).astype(
+                                            np.float32)
+                                        p = np.stack(buf_p[si], axis=0).astype(
+                                            np.float32)
+                                        self.spot_features_map[(sample_id, si)] = {
+                                            'x': x, 'pos': p}
+                                    print(
+                                        f"  - {sample_id}: rebuilt spot features via cellvit geometry + NN to spot")
+                                else:
+                                    print(
+                                        f"  - Warning: cellvit parquet for {sample_id} lacks 'geometry' column")
+                        except Exception as e:
+                            print(
+                                f"  - Error rebuilding positions from cellvit for {sample_id}: {e}")
+                    else:
+                        print(
+                            f"  - Warning: {sample_id} combined_features missing 'features'/'positions'; skip")
+            except Exception as e:
+                print(f"  - Error loading features for {sample_id}: {e}")
+
     def __len__(self):
         return len(self.all_spots_data)
-    
+
     def __getitem__(self, idx):
         spot_data = self.all_spots_data[idx]
-        
+
         # Get gene expression (target)
         spot_expressions = torch.FloatTensor(spot_data['gene_expression'])
-        
-        # Get graph data (lookup from aggregated dict; create empty graph if missing)
+
+        # Get graph data (lookup from aggregated dict; if missing, try build from raw features)
         graph_data = None
         if hasattr(self, 'intra_spot_graphs'):
             sample_graphs = self.intra_spot_graphs.get(spot_data['sample_id'])
@@ -272,30 +465,52 @@ class HESTSpatialDataset(Dataset):
                 graph_data = sample_graphs.get(spot_data['spot_idx'])
 
         if not GEOMETRIC_AVAILABLE:
-            raise ImportError("PyTorch Geometric is required but not available.")
+            raise ImportError(
+                "PyTorch Geometric is required but not available.")
 
         if graph_data is None:
-            # 使用1个占位节点而不是空图，确保梯度能通过模型参数回传（等原特征能加载了之后把这个删掉）
-            spot_graph = Data(
-                x=torch.zeros(1, self.feature_dim, dtype=torch.float32),
-                edge_index=torch.empty((2, 0), dtype=torch.long)
-            )
+            # 优先使用特征构造“无边图”，否则退化为旧的占位图
+            built = False
+            feat_key = (spot_data['sample_id'], spot_data['spot_idx'])
+            feat_entry = getattr(self, 'spot_features_map', {}).get(feat_key)
+            if feat_entry is not None:
+                x_np = feat_entry.get('x')
+                pos_np = feat_entry.get('pos')
+                if x_np is not None and pos_np is not None and len(x_np) == len(pos_np) and len(x_np) > 0:
+                    spot_graph = Data(
+                        x=torch.as_tensor(x_np, dtype=torch.float32),
+                        edge_index=torch.empty((2, 0), dtype=torch.long),
+                        pos=torch.as_tensor(pos_np, dtype=torch.float32)
+                    )
+                    built = True
+            if not built:
+                # 保底：单节点占位，避免训练崩溃
+                spot_graph = Data(
+                    x=torch.zeros(1, self.feature_dim, dtype=torch.float32),
+                    edge_index=torch.empty((2, 0), dtype=torch.long)
+                )
         elif isinstance(graph_data, Data):
             spot_graph = graph_data
         elif isinstance(graph_data, dict):
             x_key = 'x' if 'x' in graph_data else 'node_features'
-            pos_key = 'pos' if 'pos' in graph_data else ('positions' if 'positions' in graph_data else None)
+            pos_key = 'pos' if 'pos' in graph_data else (
+                'positions' if 'positions' in graph_data else None)
             if 'edge_index' not in graph_data or x_key not in graph_data:
-                raise KeyError("Graph dict must contain 'edge_index' and 'x' or 'node_features'.")
+                raise KeyError(
+                    "Graph dict must contain 'edge_index' and 'x' or 'node_features'.")
             x_tensor = torch.as_tensor(graph_data[x_key], dtype=torch.float32)
-            edge_index_tensor = torch.as_tensor(graph_data['edge_index'], dtype=torch.long)
+            edge_index_tensor = torch.as_tensor(
+                graph_data['edge_index'], dtype=torch.long)
             pos_tensor = None
             if pos_key is not None:
-                pos_tensor = torch.as_tensor(graph_data[pos_key], dtype=torch.float32)
-            spot_graph = Data(x=x_tensor, edge_index=edge_index_tensor, pos=pos_tensor)
+                pos_tensor = torch.as_tensor(
+                    graph_data[pos_key], dtype=torch.float32)
+            spot_graph = Data(
+                x=x_tensor, edge_index=edge_index_tensor, pos=pos_tensor)
         else:
-            raise TypeError("Unsupported graph data type; expected PyG Data or dict.")
-        
+            raise TypeError(
+                "Unsupported graph data type; expected PyG Data or dict.")
+
         return {
             'spot_expressions': spot_expressions,
             'spot_graphs': spot_graph,
@@ -308,11 +523,12 @@ def collate_fn_hest_graph(batch):
     """
     Custom collate function for HEST graph data
     """
-    spot_expressions = torch.stack([item['spot_expressions'] for item in batch])
+    spot_expressions = torch.stack(
+        [item['spot_expressions'] for item in batch])
     spot_graphs = [item['spot_graphs'] for item in batch]
     sample_ids = [item['sample_id'] for item in batch]
     spot_ids = [item['spot_id'] for item in batch]
-    
+
     return {
         'spot_expressions': spot_expressions,
         'spot_graphs': spot_graphs,
