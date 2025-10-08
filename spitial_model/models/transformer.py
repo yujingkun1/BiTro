@@ -21,7 +21,7 @@ class StaticGraphTransformerPredictor(nn.Module):
                  gnn_output_dim=128,  
                  embed_dim=256,
                  num_genes=18080,
-                 num_layers=2,
+                 num_layers=3,
                  nhead=8,
                  dropout=0.1,
                  use_gnn=True,
