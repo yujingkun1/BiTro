@@ -122,7 +122,11 @@ class HESTDirectReader:
                     
                     # 加载特征数据 - 添加allow_pickle=True来处理metadata
                     data = np.load(feature_file, allow_pickle=True)
-                    features = data['features']  # [N, 128] 的深度特征
+                    features = data['features'].astype(np.float32)  # [N, D] 的深度特征
+                    positions = data['positions'].astype(np.float32) if 'positions' in data else None
+                    cell_index = data['cell_index'] if 'cell_index' in data else None
+                    spot_ptr = data['spot_ptr'] if 'spot_ptr' in data else None
+                    spot_index = data['spot_index'] if 'spot_index' in data else None
                     
                     # 安全处理metadata
                     try:
@@ -139,14 +143,31 @@ class HESTDirectReader:
                         print(f"    警告: metadata解析失败: {meta_e}")
                         metadata = {}
                     
+                    # 对齐检查与裁剪（如有需要）
+                    n_feat = features.shape[0]
+                    if positions is not None:
+                        n_pos = positions.shape[0]
+                        if n_pos != n_feat:
+                            n_min = min(n_feat, n_pos)
+                            print(f"    警告: features与positions长度不一致: feats={n_feat}, pos={n_pos}，将裁剪为 {n_min}")
+                            features = features[:n_min]
+                            positions = positions[:n_min]
+                            n_feat = n_min
+                    
                     self.deep_features[sample_id] = {
                         'features': features,
+                        'positions': positions,
+                        'cell_index': cell_index,
+                        'spot_ptr': spot_ptr,
+                        'spot_index': spot_index,
                         'metadata': metadata
                     }
                     
                     print(f"  - 特征形状: {features.shape}")
                     print(f"  - 特征维度: {features.shape[1]}")
                     print(f"  - 细胞数量: {features.shape[0]}")
+                    if positions is not None:
+                        print(f"  - 坐标可用: {positions.shape}")
                     
                 else:
                     print(f"  警告: 未找到样本 {sample_id} 的特征文件: {feature_file}")
@@ -162,9 +183,30 @@ class HESTDirectReader:
         
         sample_info = self.sample_data[sample_id]
         cellvit_df = sample_info.get('cellvit')
+
+        # 如果深度特征中存在positions，则优先使用以确保与特征严格对齐
+        deep = self.deep_features.get(sample_id) if hasattr(self, 'deep_features') else None
+        if deep is not None and deep.get('positions') is not None:
+            positions = deep['positions']
+            n = positions.shape[0]
+            print(f"  使用NPZ中的positions作为细胞坐标，对齐长度: {n}")
+            # 若没有cellvit或长度不匹配，仅使用positions生成基础表
+            cells_data = []
+            for idx in range(n):
+                x, y = float(positions[idx, 0]), float(positions[idx, 1])
+                # 面积与周长无法从positions推断，使用默认值占位（不会影响深度特征分支）
+                cells_data.append({
+                    'cell_id': idx,
+                    'x': x,
+                    'y': y,
+                    'area': 100.0,
+                    'perimeter': 35.4,
+                    'shape_feature': 1.0
+                })
+            return pd.DataFrame(cells_data)
         
         if cellvit_df is None or len(cellvit_df) == 0:
-            print(f"  警告: 样本 {sample_id} 无细胞分割数据，使用spot中心点")
+            print(f"  警告: 样本 {sample_id} 无细胞分割数据且无positions，使用spot中心点")
             return self.create_spot_based_features(sample_info['adata'])
         
         # 提取细胞特征
@@ -364,6 +406,21 @@ class HESTDirectReader:
         print(f"构建样本 {sample_id} 的spot内图...")
         
         cells_df = self.processed_data[sample_id]['cells']
+        # 如果有spot分组信息（来自深度特征spot_ptr或spot_index），尝试优先使用
+        deep = self.deep_features.get(sample_id) if hasattr(self, 'deep_features') else None
+        group_by_spot = None
+        if deep is not None:
+            spot_ptr = deep.get('spot_ptr')
+            spot_index = deep.get('spot_index')
+            if spot_ptr is not None and isinstance(spot_ptr, (np.ndarray, list)) and len(spot_ptr) >= 2:
+                # 通过ptr映射构造字典：spot_idx -> 索引范围
+                group_by_spot = {int(si): (int(spot_ptr[si]), int(spot_ptr[si+1])) for si in range(len(spot_ptr)-1)}
+            elif spot_index is not None and isinstance(spot_index, np.ndarray):
+                # 通过index分组
+                group_by_spot = {}
+                for i, si in enumerate(spot_index.tolist()):
+                    si = int(si)
+                    group_by_spot.setdefault(si, []).append(i)
         assigned_cells = cells_df[cells_df['spot_assignment'] >= 0]
         
         intra_spot_graphs = {}
@@ -387,11 +444,29 @@ class HESTDirectReader:
                 continue
             
             # 提取位置和特征
+            # 默认使用cells_df计算位置与特征
             positions = spot_cells[['x', 'y']].values
             cell_features = np.array([
-                self.extract_cell_feature_vector(row, sample_id, row.name) 
+                self.extract_cell_feature_vector(row, sample_id, row.name)
                 for _, row in spot_cells.iterrows()
             ])
+
+            # 若深度特征提供了严格按spot划分的索引，且长度匹配，优先使用以避免对齐偏差
+            if deep is not None and deep.get('features') is not None and deep.get('positions') is not None:
+                feats_np = deep['features']
+                pos_np = deep['positions']
+                if isinstance(group_by_spot, dict) and spot_idx in group_by_spot:
+                    idxs = group_by_spot[spot_idx]
+                    if isinstance(idxs, tuple):
+                        s, e = idxs
+                        if 0 <= s < e <= feats_np.shape[0] and e <= pos_np.shape[0]:
+                            positions = pos_np[s:e]
+                            cell_features = feats_np[s:e]
+                    elif isinstance(idxs, list) and len(idxs) > 0:
+                        idxs = [i for i in idxs if 0 <= i < feats_np.shape[0] and i < pos_np.shape[0]]
+                        if idxs:
+                            positions = pos_np[idxs]
+                            cell_features = feats_np[idxs]
             
             # spot内所有细胞都可以连接，使用k近邻控制连接密度
             k = min(intra_spot_k_neighbors, len(spot_cells) - 1)

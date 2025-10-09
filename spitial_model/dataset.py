@@ -288,89 +288,77 @@ class HESTSpatialDataset(Dataset):
     def load_feature_data(self):
         """Load per-spot cell features/positions from combined_features.npz per sample.
 
-        设计目标：当某个 spot 没有图时，使用该 spot 的细胞特征与坐标构建无边图（edge_index 为空），
-        从而在模型中自动跳过GNN，直接进入Transformer。
-
-        容错实现：尝试多种常见的键结构；若解析失败则记为空，不影响整体训练流程。
+        约定的数据格式（简化后）：
+        - 每个样本一个NPZ：{sample_id}_combined_features.npz
+        - 支持两种组织方式（二选一）：
+          1) per_spot: dict[int spot_idx -> { 'x': ndarray[num_cells,D], 'pos': ndarray[num_cells,2] }]
+          2) 扁平：features(ndarray[N,D]), positions(ndarray[N,2])，并配合 spot_ptr(M+1) 或 spot_index(N) 来分组至spot
+        
+        目标：当某个spot没有图时，使用该spot的细胞特征与坐标构建“无边图”（edge_index为空），
+        在模型中自动跳过GNN，直接进入Transformer。
         """
         import numpy as np
-        # key: (sample_id, spot_idx) -> dict(x: np.ndarray, pos: np.ndarray)
         self.spot_features_map = {}
 
         if self.features_dir is None:
             print("[feature] features_dir not provided, skip loading features")
             return
 
-        print("=== Loading per-spot cell features for missing-graph fallback ===")
+        print("=== Loading per-spot cell features for missing-graph fallback (simplified) ===")
         for sample_id in self.sample_ids:
-            npz_path = os.path.join(
-                self.features_dir, f"{sample_id}_combined_features.npz")
+            npz_path = os.path.join(self.features_dir, f"{sample_id}_combined_features.npz")
             if not os.path.exists(npz_path):
-                print(
-                    f"  - Warning: combined features file not found for sample {sample_id}: {npz_path}")
+                print(f"  - Warning: features file not found for sample {sample_id}: {npz_path}")
                 continue
             try:
                 npz = np.load(npz_path, allow_pickle=True)
-                keys = list(npz.keys())
-                # 优先尝试字典式按 spot 存储
-                # 例如：per_spot -> { spot_idx:int: { 'x': ndarray, 'pos': ndarray } }
-                per_spot = None
+                keys = set(npz.keys())
+
+                # 1) per_spot 组织
                 if 'per_spot' in keys:
+                    per_spot = None
                     try:
                         per_spot = npz['per_spot'].item()
                     except Exception:
                         per_spot = None
+                    if isinstance(per_spot, dict):
+                        count = 0
+                        for spot_idx, v in per_spot.items():
+                            if isinstance(v, dict) and 'x' in v and 'pos' in v:
+                                x = np.asarray(v['x'], dtype=np.float32)
+                                pos = np.asarray(v['pos'], dtype=np.float32)
+                                if len(x) == len(pos) and x.ndim == 2 and pos.ndim == 2 and pos.shape[1] == 2:
+                                    self.spot_features_map[(sample_id, int(spot_idx))] = {'x': x, 'pos': pos}
+                                    count += 1
+                        print(f"  - {sample_id}: loaded per_spot entries: {count}")
+                        continue
 
-                if isinstance(per_spot, dict):
-                    for spot_idx, v in per_spot.items():
-                        try:
-                            x = v.get('x') if isinstance(v, dict) else None
-                            pos = v.get('pos') if isinstance(v, dict) else None
-                            if x is not None and pos is not None and len(x) == len(pos):
-                                self.spot_features_map[(sample_id, int(spot_idx))] = {
-                                    'x': x.astype(np.float32),
-                                    'pos': pos.astype(np.float32)
-                                }
-                        except Exception:
-                            continue
-                    print(f"  - {sample_id}: loaded per_spot features entries: "
-                          f"{sum(1 for k in self.spot_features_map if k[0]==sample_id)}")
-                    continue
+                # 2) 扁平组织：features + positions + spot_ptr 或 spot_index
+                if 'features' in keys and 'positions' in keys:
+                    feats = np.asarray(npz['features'], dtype=np.float32)
+                    poss = np.asarray(npz['positions'], dtype=np.float32)
+                    if feats.shape[0] != poss.shape[0]:
+                        n_min = min(feats.shape[0], poss.shape[0])
+                        print(f"  - Warning: feats({feats.shape[0]}) != positions({poss.shape[0]}), trunc -> {n_min}")
+                        feats = feats[:n_min]
+                        poss = poss[:n_min]
 
-                # 退化方案：平铺数据 + 索引映射
-                # 例如：features(N, D), positions(N, 2), spot_ptr(M+1) 或 spot_index(N)
-                feats = None
-                poss = None
-                if 'features' in keys:
-                    feats = npz['features']
-                if 'positions' in keys:
-                    poss = npz['positions']
-                elif 'pos' in keys:
-                    poss = npz['pos']
-                elif 'coords' in keys:
-                    poss = npz['coords']
+                    spot_ptr = npz['spot_ptr'] if 'spot_ptr' in keys else None
+                    spot_index = npz['spot_index'] if 'spot_index' in keys else None
 
-                # spot_ptr 表示前缀和切分；spot_index 表示每个细胞属于哪个 spot_idx
-                spot_ptr = npz['spot_ptr'] if 'spot_ptr' in keys else None
-                spot_index = npz['spot_index'] if 'spot_index' in keys else None
-
-                if feats is not None and poss is not None:
                     if spot_ptr is not None:
-                        # 使用 ptr 切分
                         for si in range(len(spot_ptr) - 1):
                             s, e = int(spot_ptr[si]), int(spot_ptr[si+1])
                             if e > s:
                                 self.spot_features_map[(sample_id, si)] = {
-                                    'x': feats[s:e].astype(np.float32),
-                                    'pos': poss[s:e].astype(np.float32)
+                                    'x': feats[s:e],
+                                    'pos': poss[s:e]
                                 }
-                        print(
-                            f"  - {sample_id}: built spot features via spot_ptr")
-                    elif spot_index is not None:
-                        # 使用分组索引
+                        print(f"  - {sample_id}: built spot features via spot_ptr")
+                        continue
+                    if spot_index is not None:
                         from collections import defaultdict
-                        buf_x = defaultdict(list)
-                        buf_p = defaultdict(list)
+                        buf_x, buf_p = defaultdict(list), defaultdict(list)
                         for i in range(feats.shape[0]):
                             si = int(spot_index[i])
                             buf_x[si].append(feats[i])
@@ -378,73 +366,13 @@ class HESTSpatialDataset(Dataset):
                         for si in buf_x:
                             x = np.stack(buf_x[si], axis=0).astype(np.float32)
                             p = np.stack(buf_p[si], axis=0).astype(np.float32)
-                            self.spot_features_map[(sample_id, si)] = {
-                                'x': x, 'pos': p}
-                        print(
-                            f"  - {sample_id}: built spot features via spot_index")
-                    else:
-                        print(
-                            f"  - Warning: {sample_id} combined_features lacks spot grouping info; skip")
+                            self.spot_features_map[(sample_id, si)] = {'x': x, 'pos': p}
+                        print(f"  - {sample_id}: built spot features via spot_index")
+                        continue
+
+                    print(f"  - Warning: {sample_id} lacks spot_ptr/spot_index; cannot group features")
                 else:
-                    # 如果只有 features，没有 positions，则尝试从 CellViT 分割数据恢复坐标并按最近spot聚合
-                    if feats is not None and poss is None:
-                        try:
-                            import pandas as pd
-                            from shapely import wkb as _wkb
-                            from sklearn.neighbors import KDTree
-                            cellvit_file = os.path.join(
-                                self.hest_data_dir, "cellvit_seg", f"{sample_id}_cellvit_seg.parquet")
-                            if not os.path.exists(cellvit_file):
-                                print(
-                                    f"  - Warning: cellvit parquet not found for {sample_id}: {cellvit_file}")
-                            else:
-                                df = pd.read_parquet(cellvit_file)
-                                if 'geometry' in df.columns:
-                                    xs = np.zeros(len(df), dtype=np.float32)
-                                    ys = np.zeros(len(df), dtype=np.float32)
-                                    for i in range(len(df)):
-                                        try:
-                                            geom = _wkb.loads(
-                                                df.iloc[i]['geometry'])
-                                            c = geom.centroid
-                                            xs[i] = float(c.x)
-                                            ys[i] = float(c.y)
-                                        except Exception:
-                                            xs[i] = 0.0
-                                            ys[i] = 0.0
-                                    positions = np.stack([xs, ys], axis=1)
-                                    adata = self.hest_data[sample_id]['adata']
-                                    spot_coords = np.asarray(
-                                        adata.obsm['spatial'], dtype=np.float32)
-                                    tree = KDTree(spot_coords)
-                                    dists, idxs = tree.query(
-                                        positions, k=1, return_distance=True)
-                                    idxs = idxs.flatten()
-                                    from collections import defaultdict
-                                    buf_x = defaultdict(list)
-                                    buf_p = defaultdict(list)
-                                    for i in range(feats.shape[0]):
-                                        si = int(idxs[i])
-                                        buf_x[si].append(feats[i])
-                                        buf_p[si].append(positions[i])
-                                    for si in buf_x:
-                                        x = np.stack(buf_x[si], axis=0).astype(
-                                            np.float32)
-                                        p = np.stack(buf_p[si], axis=0).astype(
-                                            np.float32)
-                                        self.spot_features_map[(sample_id, si)] = {
-                                            'x': x, 'pos': p}
-                                    print(
-                                        f"  - {sample_id}: rebuilt spot features via cellvit geometry + NN to spot")
-                                else:
-                                    print(
-                                        f"  - Warning: cellvit parquet for {sample_id} lacks 'geometry' column")
-                        except Exception as e:
-                            print(
-                                f"  - Error rebuilding positions from cellvit for {sample_id}: {e}")
-                    else:
-                        print(
-                            f"  - Warning: {sample_id} combined_features missing 'features'/'positions'; skip")
+                    print(f"  - Warning: {sample_id} missing 'features' or 'positions'")
             except Exception as e:
                 print(f"  - Error loading features for {sample_id}: {e}")
 
