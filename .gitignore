@@ -3,4 +3,8 @@
 *.pyc
 *.pyo
 *.pyd
+*.npy
+*.png
+*.txt
+*.json
 *__pycache__
