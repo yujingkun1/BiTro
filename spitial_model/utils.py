@@ -39,16 +39,12 @@ def get_fold_samples(fold_idx, all_samples=None):
         9: ['ZEN43', 'ZEN42', 'ZEN39', 'ZEN38']
     }
     fold_splits = {
-        0: ['TENX152'],
-        1: ['MISC69'],
-        2: ['MISC64'],
-        3: ['MISC56'],
-        4: ['MISC47'],
-        5: ['MISC42'],
-        6: ['MISC37'],
-        7: ['TENX92'],
-        8: ['TENX29'],
-        9: ['ZEN43']
+        0:['SPA154', 'SPA153', 'SPA152', 'SPA151', 'SPA150', 'SPA149'],
+        1:['SPA148', 'SPA147', 'SPA146', 'SPA145', 'SPA144', 'SPA143'],
+        2:['SPA142', 'SPA141', 'SPA140', 'SPA139', 'SPA138', 'SPA137'],
+        3:['SPA136', 'SPA135', 'SPA134', 'SPA133', 'SPA132', 'SPA131'],
+        4:['SPA130', 'SPA129', 'SPA128', 'SPA127', 'SPA126', 'SPA125'],
+        5:['SPA124', 'SPA123', 'SPA122', 'SPA121', 'SPA120', 'SPA119'],
     }
 
     test_samples = fold_splits[fold_idx]

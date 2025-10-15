@@ -35,19 +35,19 @@ def convert_numpy_types(obj):
 
 
 def main():
-    """Main training workflow - 10-fold cross validation"""
+    """Main training workflow - supports 10-fold and leave-one-out cross validation"""
     
     # Configuration parameters
     hest_data_dir = "/data/yujk/hovernet2feature/HEST/hest_data"
     graph_dir = "/data/yujk/hovernet2feature/hest_graphs_dinov3"
-    features_dir = "/data/yujk/hovernet2feature/hest_spatial_features_independent_pca_dinov3"
+    features_dir = "/data/yujk/hovernet2feature/hest_spatial_features_with_pos"
     
     # Specify gene file
     gene_file = "/data/yujk/hovernet2feature/HEST/tutorials/SA_process/common_genes_misc_tenx_zen_897.txt"
     
     batch_size = 16
-    num_epochs = 3
-    learning_rate = 1e-3  # 大幅提高学习率
+    num_epochs = 70
+    learning_rate = 1e-5  # 大幅提高学习率
     weight_decay = 1e-5   # 恢复正常weight_decay
     feature_dim = 128
     
@@ -55,16 +55,18 @@ def main():
     patience = 50
     min_delta = 1e-6
     
-    # Start training from specified fold
-    start_fold = 0  
-    
-    print("=== HEST Spatial Supervised Training - 10-fold Cross Validation ===")
+    # Cross-validation mode
+    # options: "kfold" (existing 10-fold) or "loo" (leave-one-out)
+    cv_mode = os.environ.get("CV_MODE", "kfold")
+    start_fold = 0  # only used for kfold
+
+    print("=== HEST Spatial Supervised Training ===")
     print("✓ Using direct file reading (no HEST API required)")
     print("✓ Using 897 intersection genes")
-    print("✓ Sample-level 10-fold cross validation")
-    # print(f"✓ Total samples: {len(all_samples)}")
+    print(f"✓ CV mode: {cv_mode}")
     print(f"✓ Gene file: {gene_file}")
-    print(f"✓ Starting from Fold {start_fold + 1}")
+    if cv_mode == "kfold":
+        print(f"✓ Starting from Fold {start_fold + 1}")
     
     # Setup device
     device = setup_device(device_id=1)
@@ -89,14 +91,36 @@ def main():
         except Exception as e:
             print(f"Warning: Could not load temporary results file: {e}")
     
-    # Execute 10-fold cross validation (starting from specified fold)
-    for fold_idx in range(start_fold, 10):
+    if cv_mode == "kfold":
+        # Execute 10-fold cross validation (starting from specified fold)
+        fold_plan = [(fi,)+get_fold_samples(fi) for fi in range(start_fold, 10)]
+    elif cv_mode == "loo":
+        # Build leave-one-out plan by scanning all samples from the fold definition union
+        # Reuse get_fold_samples to enumerate all samples across folds
+        all_samples = []
+        for fi in range(0, 10):
+            try:
+                tr, te = get_fold_samples(fi)
+                for s in tr + te:
+                    if s not in all_samples:
+                        all_samples.append(s)
+            except Exception:
+                # utils may define fewer than 10 folds (e.g., 6); stop when KeyError
+                break
+        if not all_samples:
+            raise RuntimeError("No samples discovered for leave-one-out CV")
+        fold_plan = [(i, [s for s in all_samples if s != heldout], [heldout]) for i, heldout in enumerate(all_samples)]
+    else:
+        raise ValueError(f"Unknown CV_MODE: {cv_mode}")
+
+    for fold_tuple in fold_plan:
+        fold_idx, train_samples, test_samples = fold_tuple
+        total_folds = len(fold_plan)
         print(f"\n{'='*50}")
-        print(f"Starting Fold {fold_idx + 1}/10")
+        print(f"Starting Fold {fold_idx + 1}/{total_folds}")
         print(f"{'='*50}")
         
         # Get current fold train and test samples
-        train_samples, test_samples = get_fold_samples(fold_idx)
         print(f"Training samples ({len(train_samples)}): {train_samples}")
         print(f"Test samples ({len(test_samples)}): {test_samples}")
         
@@ -221,7 +245,10 @@ def main():
     
     # Final summary
     print(f"\n{'='*60}")
-    print(f"10-FOLD CROSS VALIDATION COMPLETED")
+    if cv_mode == "kfold":
+        print(f"10-FOLD CROSS VALIDATION COMPLETED")
+    else:
+        print(f"LEAVE-ONE-OUT CROSS VALIDATION COMPLETED")
     print(f"{'='*60}")
     
     # Calculate overall statistics
@@ -240,7 +267,7 @@ def main():
     print(f"Average final test loss: {np.mean(final_test_losses):.6f} ± {np.std(final_test_losses):.6f}")
     
     # Save final results
-    final_results_file = "./logs/final_10fold_results.json"
+    final_results_file = "./logs/final_10fold_results.json" if cv_mode == "kfold" else "./logs/final_loo_results.json"
     with open(final_results_file, 'w') as f:
         json.dump(all_fold_results, f, indent=2, default=convert_numpy_types)
     

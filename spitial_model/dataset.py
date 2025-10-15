@@ -80,7 +80,7 @@ class HESTSpatialDataset(Dataset):
 
         # Load intersection gene list (preserve order from file!)
         if self.gene_file is None:
-            self.gene_file = "/data/yujk/hovernet2feature/HEST/tutorials/SA_process/common_genes_misc_tenx_zen_897.txt"
+            self.gene_file = "/data/yujk/hovernet2feature/HisToGene/data/her_hvg_cut_1000.txt"
 
         print(f"Loading intersection gene list from: {self.gene_file}")
         selected_genes_ordered = []

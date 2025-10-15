@@ -52,7 +52,8 @@ class HESTCellFeatureExtractor:
                  device='cuda',
                  dino_batch_size=256,         # 大幅增加DINOv3批处理大小
                  cell_batch_size=50000,       # 大幅增加细胞批处理大小
-                 num_workers=8):              # 多进程工作者数量
+                 num_workers=8,               # 多进程工作者数量
+                 assign_spot=False):          # 是否在保存时计算并写出spot_index
         
         if not DINOV3_AVAILABLE:
             raise ImportError("DINOv3不可用，请安装transformers")
@@ -69,6 +70,7 @@ class HESTCellFeatureExtractor:
         self.dino_batch_size = dino_batch_size
         self.cell_batch_size = cell_batch_size
         self.num_workers = num_workers
+        self.assign_spot = assign_spot
         
         # 确保输出目录存在
         os.makedirs(output_dir, exist_ok=True)
@@ -485,6 +487,7 @@ class HESTCellFeatureExtractor:
         num_cells = len(cellvit_df)
         max_cells = num_cells  # 提取所有细胞，不限制数量
         cell_patches = []
+        cell_positions = []  # 与patch按顺序对齐的细胞中心坐标 (x, y)
         
         print(f"准备提取所有 {num_cells} 个细胞的特征...")
         
@@ -516,12 +519,13 @@ class HESTCellFeatureExtractor:
                 
                 # 并行提取patches以大幅提高CPU利用率
                 print(f"\n  使用{self.num_workers}个并行进程提取patches...")
-                batch_patches = self._extract_patches_parallel(
+                batch_patches, batch_positions = self._extract_patches_parallel(
                     cellvit_df.iloc[start_idx:end_idx], wsi, level, start_idx
                 )
                 
                 # 将本批次的patches添加到总列表
                 cell_patches.extend(batch_patches)
+                cell_positions.extend(batch_positions)
                 
                 # 优化内存清理
                 del batch_patches
@@ -564,7 +568,17 @@ class HESTCellFeatureExtractor:
         }
         
         # 保存特征
-        output_file = self.save_features(sample_id, final_features, metadata)
+        # 位置与索引
+        positions = np.asarray(cell_positions, dtype=np.float32) if len(cell_positions) > 0 else np.zeros((len(cell_patches), 2), dtype=np.float32)
+        cell_index = np.arange(positions.shape[0], dtype=np.int64)
+        spot_index = None
+        if self.assign_spot:
+            try:
+                spot_index = self.assign_spot_indices(sample_id, positions)
+            except Exception as e:
+                print(f"[Warn] spot assignment failed for {sample_id}: {e}")
+
+        output_file = self.save_features(sample_id, final_features, metadata, positions=positions, cell_index=cell_index, spot_index=spot_index)
         
         print(f"\n=== 性能统计 ===")
         total_cells = len(cell_patches)
@@ -587,6 +601,7 @@ class HESTCellFeatureExtractor:
     def _extract_patches_parallel(self, cellvit_batch, wsi, level, start_idx):
         """使用多线程并行提取细胞patches以最大化CPU利用率"""
         batch_patches = []
+        batch_positions = []
         
         # 使用线程池而不是进程池，因为WSI对象不能序列化
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
@@ -606,13 +621,15 @@ class HESTCellFeatureExtractor:
             # 收集结果
             for task in tqdm(tasks, desc=f"批次并行提取patches"):
                 try:
-                    patch = task.result(timeout=10)  # 10秒超时
+                    patch, pos = task.result(timeout=10)  # 10秒超时
                     batch_patches.append(patch)
+                    batch_positions.append(pos)
                 except Exception as e:
                     print(f"  并行提取失败，使用默认patch: {e}")
                     batch_patches.append(np.zeros((self.cell_patch_size, self.cell_patch_size, 3), dtype=np.uint8))
+                    batch_positions.append((0.0, 0.0))
         
-        return batch_patches
+        return batch_patches, batch_positions
     
     def _extract_single_patch_threaded(self, geom_bytes, wsi, level, patch_size, cell_idx):
         """线程安全的单个细胞patch提取，使用黑色填充无效区域"""
@@ -679,13 +696,60 @@ class HESTCellFeatureExtractor:
                         
                         cell_patch[patch_y_start:patch_y_end, patch_x_start:patch_x_end] = region_array
             
-            return cell_patch
+            return cell_patch, (float(center_x), float(center_y))
             
         except Exception as e:
             if cell_idx < 5:  # 只显示前5个错误
                 print(f"    细胞 {cell_idx} patch提取失败: {e}")
             # 返回纯黑色patch作为默认值
-            return np.zeros((patch_size, patch_size, 3), dtype=np.uint8)
+            return np.zeros((patch_size, patch_size, 3), dtype=np.uint8), (0.0, 0.0)
+
+    def assign_spot_indices(self, sample_id, positions: np.ndarray):
+        """基于HEST的AnnData obsm['spatial']按最近邻且半径限制分配spot_index。
+        逻辑与 scripts/augment_features_with_positions.py 保持一致。
+        返回 ndarray[int64]，长度=N（细胞数），不可分配位置为-1。
+        """
+        import scanpy as sc
+        st_file = os.path.join(self.hest_data_dir, "st", f"{sample_id}.h5ad")
+        meta_file = os.path.join(self.hest_data_dir, "metadata", f"{sample_id}.json")
+        if not os.path.exists(st_file):
+            raise FileNotFoundError(f"h5ad not found: {st_file}")
+
+        adata = sc.read_h5ad(st_file)
+        spatial = adata.obsm['spatial'] if 'spatial' in adata.obsm_keys() else None
+        if spatial is None:
+            raise RuntimeError(f"AnnData missing obsm['spatial'] for {sample_id}")
+
+        metadata = {}
+        if os.path.exists(meta_file):
+            try:
+                with open(meta_file, 'r') as f:
+                    metadata = json.load(f)
+            except Exception:
+                metadata = {}
+
+        pixel_size_um = metadata.get('pixel_size_um_estimated', 0.5)
+        spot_diameter_px = metadata.get('spot_diameter', None)
+        if spot_diameter_px is None:
+            spot_radius_um = 25.0
+        else:
+            base_radius_um = (float(spot_diameter_px) / 2.0) * float(pixel_size_um)
+            spot_radius_um = base_radius_um * 1.5
+
+        n = positions.shape[0]
+        M = spatial.shape[0]
+        spot_index = np.full((n,), -1, dtype=np.int64)
+        batch_size = 200000
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            pcs = positions[start:end]
+            dists = np.linalg.norm(spatial[None, :, :] - pcs[:, None, :], axis=2)
+            nearest = np.argmin(dists, axis=1)
+            nearest_dist_px = dists[np.arange(end-start), nearest]
+            nearest_dist_um = nearest_dist_px * float(pixel_size_um)
+            within = nearest_dist_um <= float(spot_radius_um)
+            spot_index[start:end][within] = nearest[within].astype(np.int64)
+        return spot_index
     
     def apply_independent_pca(self, dino_features, sample_id):
         """为当前样本独立训练PCA降维（每例独立PCA版本）"""
@@ -765,17 +829,32 @@ class HESTCellFeatureExtractor:
         return reduced_features
     
     
-    def save_features(self, sample_id, combined_features, metadata):
-        """保存提取的特征"""
+    def save_features(self, sample_id, combined_features, metadata, positions=None, cell_index=None, spot_index=None):
+        """保存提取的特征，兼容 augment_features_with_positions.py 的输出格式。
+        始终写入 features 和 metadata；若提供 positions/cell_index/spot_index 则一并写入。
+        """
         output_file = os.path.join(self.output_dir, f"{sample_id}_combined_features.npz")
-        
-        np.savez_compressed(
-            output_file,
-            features=combined_features,
-            metadata=metadata
-        )
-        
-        print(f"特征已保存: {output_file}")
+
+        # 组装保存字典
+        save_dict = {
+            'features': combined_features,
+            'metadata': metadata
+        }
+        if positions is not None:
+            save_dict['positions'] = positions
+        if cell_index is not None:
+            save_dict['cell_index'] = cell_index
+        if spot_index is not None:
+            save_dict['spot_index'] = spot_index
+
+        np.savez_compressed(output_file, **save_dict)
+
+        msg_extra = []
+        if 'positions' in save_dict:
+            msg_extra.append(f"positions={save_dict['positions'].shape}")
+        if 'spot_index' in save_dict:
+            msg_extra.append(f"spot_index={save_dict['spot_index'].shape}")
+        print(f"特征已保存: {output_file}{' | ' + ' '.join(msg_extra) if msg_extra else ''}")
         return output_file
 
 
