@@ -1,4 +1,16 @@
 """spitial_model package."""
 
-# Import _setup_path first to ensure sys.path is configured
-from spitial_model import _setup_path  # noqa: F401
+# Setup path directly without circular import
+import os
+import sys
+
+_current_file_dir = os.path.dirname(
+    os.path.abspath(__file__))  # spitial_model directory
+_cell2gene_dir = os.path.dirname(_current_file_dir)  # Cell2Gene directory
+
+if _cell2gene_dir not in sys.path:
+    sys.path.insert(0, _cell2gene_dir)
+
+_cwd = os.getcwd()
+if _cwd != _cell2gene_dir and _cwd not in sys.path:
+    sys.path.insert(0, _cwd)

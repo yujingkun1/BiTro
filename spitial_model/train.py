@@ -4,22 +4,28 @@ Main Training Script for Cell2Gene HEST Spatial Gene Expression Prediction
 
 author: Jingkun Yu
 """
-
-import numpy as np
-import torch
-from torch.utils.data import DataLoader
+# fmt: off
+# pylint: disable=wrong-import-order
 import os
 import sys
 import json
 import warnings
 
-# Import spitial_model (which automatically sets up sys.path via _setup_path)
-import spitial_model  # noqa: F401
+# Add parent directory to sys.path BEFORE any local imports
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+_parent_dir = os.path.dirname(_current_dir)
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
 
-# Now safe to import from spitial_model submodules
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+
+# Import from local spitial_model submodules
 from spitial_model.dataset import HESTSpatialDataset, collate_fn_hest_graph
 from spitial_model.trainer import train_hest_graph_model, setup_optimizer_and_scheduler, setup_model
 from spitial_model.utils import get_fold_samples, evaluate_model_metrics, save_evaluation_results, plot_training_curves, setup_device
+# fmt: on
 
 warnings.filterwarnings("ignore")
 
