@@ -5,9 +5,6 @@ Main Training Script for Cell2Gene HEST Spatial Gene Expression Prediction
 author: Jingkun Yu
 """
 
-from spitial_model.utils import get_fold_samples, evaluate_model_metrics, save_evaluation_results, plot_training_curves, setup_device
-from spitial_model.trainer import train_hest_graph_model, setup_optimizer_and_scheduler, setup_model
-from spitial_model.dataset import HESTSpatialDataset, collate_fn_hest_graph
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -16,14 +13,13 @@ import sys
 import json
 import warnings
 
-# Add the Cell2Gene directory to sys.path BEFORE any local imports
-_current_file_dir = os.path.dirname(
-    os.path.abspath(__file__))  # spitial_model directory
-_cell2gene_dir = os.path.dirname(_current_file_dir)  # Cell2Gene directory
-if _cell2gene_dir not in sys.path:
-    sys.path.insert(0, _cell2gene_dir)
+# Import spitial_model (which automatically sets up sys.path via _setup_path)
+import spitial_model  # noqa: F401
 
-# Now safe to import from spitial_model
+# Now safe to import from spitial_model submodules
+from spitial_model.dataset import HESTSpatialDataset, collate_fn_hest_graph
+from spitial_model.trainer import train_hest_graph_model, setup_optimizer_and_scheduler, setup_model
+from spitial_model.utils import get_fold_samples, evaluate_model_metrics, save_evaluation_results, plot_training_curves, setup_device
 
 warnings.filterwarnings("ignore")
 
