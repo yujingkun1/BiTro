@@ -4,26 +4,13 @@ A modular implementation for predicting spatial gene expression from histology i
 
 ## Project Structure
 
-```
-Cell2Gene/
-├── models/
-│   ├── __init__.py
-│   ├── gnn.py              # Graph Neural Network models (GAT, GCN)
-│   └── transformer.py     # Transformer-based predictor
-├── dataset.py              # HEST dataset handling
-├── trainer.py              # Training functions
-├── utils.py                # Utility functions and evaluation metrics
-├── train.py                # Main training script
-├── logs/                   # Training logs and results
-├── checkpoints/            # Model checkpoints
-└── data/                   # Data storage
-```
+
 
 ## Usage
 
 ### Spatial Model Training
 
-
+The hest dataset is already preprocessed the data well, so we just need to normalize the image using vahadane method for preprocessing of feature extraction.
 #### 1. Extract_spatial_features
 ```bash
 cd /data/yujk/hovernet2feature/Cell2Gene
@@ -41,15 +28,22 @@ python train.py
 ```
 ### Bulk Model Training
 The model trained on bulk RNA-seq data to prepare for transfer learning.
-#### 1. Segment cells Using CellViT
+#### Data preprocessing
+Using these commands to preprocess the bulk RNA-seq data.
+```bash
+python bulk_model/pre_processing/select_wsi.py
+python bulk_model/pre_processing/extract_features.py
+python bulk_model/pre_processing/patch_normalization.py
+```
+####  Segment cells Using CellViT
 ```bash
 CellViT-inference --config-dir cellVit.yaml
 ```
-#### 2. Extract Cell Features
+####  Extract Cell Features
 ```bash
 python utils/extract_spatial_features_dinov3.py
 ```
-#### 3. Construct Cell Graph of Bulk Data
+####  Construct Cell Graph of Bulk Data
 ```bash
 python utils/bulk_graph_construction.py
 ```

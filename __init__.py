@@ -11,9 +11,5 @@ author: Jingkun Yu
 __version__ = "1.0.0"
 __author__ = "Jingkun Yu"
 
-from . import models
-from . import utils
-from . import dataset
-from . import trainer
-
-__all__ = ["models", "utils", "dataset", "trainer"]
+# Don't import submodules here to avoid circular imports
+__all__ = []
