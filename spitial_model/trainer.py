@@ -15,7 +15,8 @@ warnings.filterwarnings("ignore")
 
 
 def train_hest_graph_model(model, train_loader, test_loader, optimizer, scheduler=None,
-                           num_epochs=100, device="cuda", patience=10, min_delta=1e-6, fold_idx=None):
+                           num_epochs=100, device="cuda", patience=10, min_delta=1e-6, fold_idx=None,
+                           pearson_weight: float = 0.6):
     """
     Training function for HEST graph model with early stopping
     """
@@ -26,12 +27,14 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
     best_loss = float('inf')
     best_test_loss = float('inf')
 
+    from .utils import pearson_correlation_loss
     # Early stopping variables
     early_stopping_counter = 0
     best_epoch = 0
 
     train_losses = []
     test_losses = []
+    epoch_mean_gene_corrs = []  # per-epoch mean gene Pearson on test set
 
     print("=== Starting HEST Graph Training (with early stopping) ===")
     print(
@@ -72,8 +75,10 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
                     print(
                         f"  predictions.requires_grad: {predictions.requires_grad}")
 
-                # Calculate loss in log space: targets are already log1p-transformed
-                loss = criterion(predictions, spot_expressions)
+                # Calculate mixed loss in log space: MSE + lambda * PearsonLoss
+                mse_loss = criterion(predictions, spot_expressions)
+                pearson_loss = pearson_correlation_loss(predictions, spot_expressions)
+                loss = mse_loss + pearson_weight * pearson_loss
 
                 # Check for anomalous values
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -114,10 +119,18 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
         epoch_loss = running_loss / num_batches
         train_losses.append(epoch_loss)
 
-        # Calculate test loss
-        from .utils import evaluate_model
+        # Calculate test loss (using pure MSE for comparability) and per-epoch Pearson
+        from .utils import evaluate_model, evaluate_model_metrics
         test_loss = evaluate_model(model, test_loader, device)
         test_losses.append(test_loss)
+
+        # Lightweight Pearson computation using existing metrics function
+        try:
+            metrics, _, _ = evaluate_model_metrics(model, test_loader, device)
+            epoch_mean_gene_corr = float(metrics.get('mean_gene_correlation', 0.0))
+        except Exception:
+            epoch_mean_gene_corr = 0.0
+        epoch_mean_gene_corrs.append(epoch_mean_gene_corr)
 
         # Learning rate scheduling
         if scheduler is not None:
@@ -126,6 +139,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
         current_lr = optimizer.param_groups[0]['lr']
         print(f"Epoch {epoch+1}/{num_epochs}")
         print(f"  Train Loss: {epoch_loss:.6f}, Test Loss: {test_loss:.6f}")
+        print(f"  Mean Gene Pearson: {epoch_mean_gene_corr:.6f}")
         print(f"  LR: {current_lr:.2e}")
 
         # 添加梯度范数监控
@@ -166,7 +180,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
     print(f"Best test loss: {best_test_loss:.6f} (Epoch {best_epoch})")
     print(f"Total epochs: {len(train_losses)}")
 
-    return train_losses, test_losses
+    return train_losses, test_losses, epoch_mean_gene_corrs
 
 
 def setup_optimizer_and_scheduler(model, learning_rate=1e-3, weight_decay=1e-5, num_epochs=60):
@@ -182,11 +196,20 @@ def setup_optimizer_and_scheduler(model, learning_rate=1e-3, weight_decay=1e-5, 
     return optimizer, scheduler
 
 
-def setup_model(feature_dim, num_genes, device):
+def setup_model(feature_dim, num_genes, device, use_transfer_learning=False, bulk_model_path=None, freeze_backbone=False):
     """
     Setup model with proper parameter initialization
+
+    Args:
+        feature_dim: Input feature dimension
+        num_genes: Number of target genes
+        device: Device to place model on
+        use_transfer_learning: Whether to load pretrained weights from bulkmodel
+        bulk_model_path: Path to bulkmodel weights
+        freeze_backbone: Whether to freeze backbone layers during training
     """
     from .models import StaticGraphTransformerPredictor
+    import os
 
     # Create model
     model = StaticGraphTransformerPredictor(
@@ -202,6 +225,86 @@ def setup_model(feature_dim, num_genes, device):
         gnn_type='GAT',
         n_pos=128  # HIST2ST style positional encoding range
     )
+
+    # Load pretrained weights from bulkmodel if transfer learning is enabled
+    if use_transfer_learning and bulk_model_path and os.path.exists(bulk_model_path):
+        print(f"\n=== Loading Pretrained Weights from Bulk Model ===")
+        print(f"Bulk model path: {bulk_model_path}")
+        try:
+            bulk_state_dict = torch.load(bulk_model_path, map_location=device)
+            print(f"Loaded state dict with {len(bulk_state_dict)} keys")
+
+            # Load compatible weights and handle dimension mismatches
+            model_state_dict = model.state_dict()
+            loaded_keys = []
+            skipped_keys = []
+            mismatched_keys = []
+
+            for key, value in bulk_state_dict.items():
+                if key in model_state_dict:
+                    if model_state_dict[key].shape == value.shape:
+                        model_state_dict[key] = value
+                        loaded_keys.append(key)
+                    else:
+                        mismatched_keys.append(
+                            (key, model_state_dict[key].shape, value.shape))
+                else:
+                    skipped_keys.append(key)
+
+            model.load_state_dict(model_state_dict, strict=False)
+
+            print(
+                f"\n✓ Successfully loaded {len(loaded_keys)} weight layers from bulkmodel")
+            if mismatched_keys:
+                print(
+                    f"⚠ Skipped {len(mismatched_keys)} layers due to shape mismatch:")
+                # Show first 5
+                for key, model_shape, bulk_shape in mismatched_keys[:5]:
+                    print(
+                        f"    {key}: model {model_shape} vs bulk {bulk_shape}")
+                if len(mismatched_keys) > 5:
+                    print(f"    ... and {len(mismatched_keys) - 5} more")
+
+            if skipped_keys:
+                print(
+                    f"⚠ Skipped {len(skipped_keys)} layers not present in spatial model")
+
+            # Freeze backbone if requested
+            if freeze_backbone:
+                print(f"\n=== Freezing Backbone Layers ===")
+                frozen_params = 0
+                trainable_params = 0
+
+                # Freeze GNN and feature projection layers
+                if hasattr(model, 'gnn'):
+                    for param in model.gnn.parameters():
+                        param.requires_grad = False
+                        frozen_params += param.numel()
+
+                if hasattr(model, 'feature_projection'):
+                    for param in model.feature_projection.parameters():
+                        param.requires_grad = False
+                        frozen_params += param.numel()
+
+                # Keep transformer and output projection trainable
+                for param in model.transformer.parameters():
+                    trainable_params += param.numel()
+
+                for param in model.output_projection.parameters():
+                    trainable_params += param.numel()
+
+                print(f"✓ Frozen {frozen_params:,} parameters")
+                print(f"✓ Trainable {trainable_params:,} parameters")
+
+        except Exception as e:
+            print(f"❌ Error loading bulkmodel weights: {e}")
+            print("Continuing with randomly initialized model...")
+    else:
+        if use_transfer_learning and not bulk_model_path:
+            print("⚠ Transfer learning enabled but bulk_model_path not provided")
+        elif use_transfer_learning and not os.path.exists(bulk_model_path):
+            print(f"⚠ Bulk model file not found at {bulk_model_path}")
+        print("Training spatial model from scratch with random initialization")
 
     # Check model parameter gradient settings
     print(f"\n=== Checking model parameter gradient settings ===")
@@ -221,9 +324,10 @@ def setup_model(feature_dim, num_genes, device):
         print("❌ Error: No trainable parameters!")
         return None
 
-    # Ensure all parameters require gradients
+    # Ensure all trainable parameters require gradients (safety check)
     for param in model.parameters():
-        param.requires_grad_(True)
+        if param.requires_grad == False and (not freeze_backbone or 'gnn' not in str(param)):
+            param.requires_grad_(True)
 
     # Set model to training mode
     model.train()

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Main Training Script for Cell2Gene HEST Spatial Gene Expression Prediction
+Transfer Learning Training Script for Cell2Gene HEST Spatial Gene Expression Prediction
+Uses BulkModel as pretrained backbone for SpatialModel
 
 author: Jingkun Yu
 """
@@ -43,7 +44,10 @@ def convert_numpy_types(obj):
 
 
 def main():
-    """Main training workflow - supports 10-fold and leave-one-out cross validation"""
+    """
+    Main training workflow with transfer learning from BulkModel
+    Supports 10-fold and leave-one-out cross validation
+    """
 
     # Configuration parameters
     hest_data_dir = "/data/yujk/hovernet2feature/HEST/hest_data"
@@ -53,63 +57,76 @@ def main():
     # Specify gene file
     gene_file = "/data/yujk/hovernet2feature/HEST/tutorials/SA_process/common_genes_misc_tenx_zen_897.txt"
 
+    # Model training configuration
     batch_size = 16
     num_epochs = 70
-    learning_rate = 1e-6  
-    weight_decay = 1e-5   # 恢复正常weight_decay
+    learning_rate = 1e-6
+    weight_decay = 1e-5
     feature_dim = 128
 
-    # 迁移学习配置
-    use_transfer_learning = os.environ.get(
-        "USE_TRANSFER_LEARNING", "true").lower() == "true"
+    # Transfer Learning Configuration
+    use_transfer_learning = True
     bulk_model_path = "/data/yujk/hovernet2feature/best_bulk_static_372_optimized_model.pt"
-    freeze_backbone = os.environ.get(
-        "FREEZE_BACKBONE", "false").lower() == "true"
+
+    # Three transfer learning strategies:
+    # 1. "full": Load all compatible weights and fine-tune all layers
+    # 2. "frozen_backbone": Freeze GNN + feature_projection, only train transformer + output_projection
+    # 3. "frozen_decoder": Freeze GNN + transformer, only train feature_projection + output_projection
+    # Options: "full", "frozen_backbone"
+    transfer_strategy = os.environ.get("TRANSFER_STRATEGY", "full")
+    freeze_backbone = transfer_strategy == "frozen_backbone"
 
     # Early stopping parameters
-    patience = 30
+    patience = 5
     min_delta = 1e-6
 
     # Cross-validation mode
-    # options: "kfold" (existing 10-fold) or "loo" (leave-one-out)
     cv_mode = os.environ.get("CV_MODE", "kfold")
-    start_fold = 0  # only used for kfold
+    start_fold = 0
 
-    # Pearson correlation weight in mixed loss (MSE + pearson_weight * PearsonLoss)
-    pearson_weight = float(os.environ.get("PEARSON_WEIGHT", "0.6"))
-
-    print("=== HEST Spatial Supervised Training ===")
+    print("\n" + "="*70)
+    print("=== HEST SPATIAL MODEL WITH TRANSFER LEARNING FROM BULKMODEL ===")
+    print("="*70)
     print("✓ Using direct file reading (no HEST API required)")
     print("✓ Using 897 intersection genes")
     print(f"✓ CV mode: {cv_mode}")
     print(f"✓ Gene file: {gene_file}")
-    if use_transfer_learning:
-        print(f"✓ Transfer Learning enabled from bulkmodel: {bulk_model_path}")
-        print(f"✓ Freeze backbone: {freeze_backbone}")
+    print(f"\n=== Transfer Learning Settings ===")
+    print(f"✓ Bulk model path: {bulk_model_path}")
+    print(f"✓ Transfer Learning Strategy: {transfer_strategy}")
+    if freeze_backbone:
+        print("  → Frozen: GNN + Feature Projection")
+        print("  → Trainable: Transformer + Output Projection")
     else:
-        print("✓ Transfer Learning disabled - training from scratch")
+        print("  → All layers fine-tuned")
+    print(f"✓ Learning rate: {learning_rate}")
+    print(f"✓ Weight decay: {weight_decay}")
+    print(f"✓ Batch size: {batch_size}")
+    print(f"✓ Epochs: {num_epochs}")
     if cv_mode == "kfold":
         print(f"✓ Starting from Fold {start_fold + 1}")
-
-    print(f"✓ Loss: MSE + {pearson_weight:.2f} * PearsonLoss (mixed loss)")
 
     # Setup device
     device = setup_device(device_id=1)
 
     # Create results directory
-    os.makedirs("./log_normalized", exist_ok=True)
-    os.makedirs("./checkpoints", exist_ok=True)
+    results_dir = f"./log_normalized_transfer_{transfer_strategy}"
+    checkpoints_dir = f"./checkpoints_transfer_{transfer_strategy}"
+    os.makedirs(results_dir, exist_ok=True)
+    os.makedirs(checkpoints_dir, exist_ok=True)
+
+    print(f"\n✓ Results directory: {results_dir}")
+    print(f"✓ Checkpoints directory: {checkpoints_dir}")
 
     # Store all fold results
     all_fold_results = {}
 
     # Try to load temporary results
-    temp_results_file = "./log_normalized/temp_fold_results.json"
+    temp_results_file = f"{results_dir}/temp_fold_results.json"
     if os.path.exists(temp_results_file):
         try:
             with open(temp_results_file, 'r') as f:
                 all_fold_results = json.load(f)
-                # Convert string keys back to int
                 all_fold_results = {
                     int(k): v for k, v in all_fold_results.items()}
                 print(
@@ -119,12 +136,10 @@ def main():
             print(f"Warning: Could not load temporary results file: {e}")
 
     if cv_mode == "kfold":
-        # Execute 10-fold cross validation (starting from specified fold)
         fold_plan = [(fi,)+get_fold_samples(fi)
                      for fi in range(start_fold, 10)]
     elif cv_mode == "loo":
-        # Build leave-one-out plan by scanning all samples from the fold definition union
-        # Reuse get_fold_samples to enumerate all samples across folds
+        # Build leave-one-out plan
         all_samples = []
         for fi in range(0, 10):
             try:
@@ -133,18 +148,16 @@ def main():
                     if s not in all_samples:
                         all_samples.append(s)
             except Exception:
-                # utils may define fewer than 10 folds (e.g., 6); stop when KeyError
                 break
+
         if not all_samples:
             raise RuntimeError("No samples discovered for leave-one-out CV")
 
-        # Support specifying held-out sample(s) via environment variable
         heldouts_env = os.environ.get(
             "CV_HELDOUT") or os.environ.get("LOO_HELDOUT")
         if heldouts_env:
             requested = [s.strip()
                          for s in heldouts_env.split(",") if s.strip()]
-            # unique while preserving order
             seen = set()
             requested = [s for s in requested if not (
                 s in seen or seen.add(s))]
@@ -158,7 +171,6 @@ def main():
                 for i, heldout in enumerate(requested)
             ]
         else:
-            # default: iterate all samples as held-out one by one
             fold_plan = [
                 (i, [s for s in all_samples if s != heldout], [heldout])
                 for i, heldout in enumerate(all_samples)
@@ -166,23 +178,23 @@ def main():
     else:
         raise ValueError(f"Unknown CV_MODE: {cv_mode}")
 
+    # Training loop
     for fold_tuple in fold_plan:
         fold_idx, train_samples, test_samples = fold_tuple
         total_folds = len(fold_plan)
-        print(f"\n{'='*50}")
+        print(f"\n{'='*70}")
         print(f"Starting Fold {fold_idx + 1}/{total_folds}")
-        print(f"{'='*50}")
+        print(f"{'='*70}")
 
-        # Get current fold train and test samples
         print(f"Training samples ({len(train_samples)}): {train_samples}")
         print(f"Test samples ({len(test_samples)}): {test_samples}")
 
-        # Create datasets (only load required samples)
+        # Create datasets
         train_dataset = HESTSpatialDataset(
             hest_data_dir=hest_data_dir,
             graph_dir=graph_dir,
             features_dir=features_dir,
-            sample_ids=train_samples,  # Only pass training samples
+            sample_ids=train_samples,
             feature_dim=feature_dim,
             mode='train',
             gene_file=gene_file
@@ -192,20 +204,20 @@ def main():
             hest_data_dir=hest_data_dir,
             graph_dir=graph_dir,
             features_dir=features_dir,
-            sample_ids=test_samples,   # Only pass test samples
+            sample_ids=test_samples,
             feature_dim=feature_dim,
             mode='test',
             gene_file=gene_file
         )
 
-        # Create data loaders (reduce memory pressure)
+        # Create data loaders
         train_loader = DataLoader(
             train_dataset,
             batch_size=batch_size,
             shuffle=True,
             collate_fn=collate_fn_hest_graph,
-            num_workers=0,  # Avoid multi-process memory issues
-            pin_memory=False,  # Reduce memory usage
+            num_workers=0,
+            pin_memory=False,
         )
 
         test_loader = DataLoader(
@@ -213,8 +225,8 @@ def main():
             batch_size=batch_size,
             shuffle=False,
             collate_fn=collate_fn_hest_graph,
-            num_workers=0,  # Avoid multi-process memory issues
-            pin_memory=False,  # Reduce memory usage
+            num_workers=0,
+            pin_memory=False,
         )
 
         num_genes = train_dataset.num_genes
@@ -225,9 +237,16 @@ def main():
         print(f"Training spots: {len(train_dataset)}")
         print(f"Test spots: {len(test_dataset)}")
 
-        # Create model
-        model = setup_model(feature_dim, num_genes, device, use_transfer_learning=use_transfer_learning,
-                            bulk_model_path=bulk_model_path, freeze_backbone=freeze_backbone)
+        # Create model with transfer learning
+        model = setup_model(
+            feature_dim,
+            num_genes,
+            device,
+            use_transfer_learning=use_transfer_learning,
+            bulk_model_path=bulk_model_path,
+            freeze_backbone=freeze_backbone
+        )
+
         if model is None:
             print("Failed to setup model, skipping this fold")
             continue
@@ -238,21 +257,19 @@ def main():
         )
 
         print(f"\n=== Fold {fold_idx + 1} Training Configuration ===")
-        print(f"Model: StaticGraphTransformerPredictor + GAT")
+        print(f"Model: StaticGraphTransformerPredictor + GAT (with Transfer Learning)")
         print(f"Optimizer: AdamW, Learning rate: {learning_rate}")
         print(f"Batch size: {batch_size}, Epochs: {num_epochs}")
         print(f"Early stopping: patience={patience}, min_delta={min_delta}")
 
-        print(f"Loss: MSE + {pearson_weight:.2f} * PearsonLoss (mixed loss)")
-
         # Train model
         train_losses, test_losses, epoch_mean_gene_corrs = train_hest_graph_model(
             model, train_loader, test_loader, optimizer, scheduler,
-            num_epochs=num_epochs, device=device, patience=patience, min_delta=min_delta, fold_idx=fold_idx,
-            pearson_weight=pearson_weight
+            num_epochs=num_epochs, device=device, patience=patience, min_delta=min_delta, fold_idx=fold_idx
         )
 
         # Load best model for evaluation
+        best_model_path = f"{checkpoints_dir}/best_hest_graph_model.pt"
         if os.path.exists("best_hest_graph_model.pt"):
             model.load_state_dict(torch.load(
                 "best_hest_graph_model.pt", map_location=device))
@@ -263,7 +280,7 @@ def main():
             model, test_loader, device)
 
         # Save current fold's best model
-        fold_model_path = f"./checkpoints/best_hest_graph_model_fold_{fold_idx}.pt"
+        fold_model_path = f"{checkpoints_dir}/best_hest_graph_model_fold_{fold_idx}.pt"
         if os.path.exists("best_hest_graph_model.pt"):
             os.rename("best_hest_graph_model.pt", fold_model_path)
 
@@ -282,20 +299,18 @@ def main():
             'eval_results': eval_results
         }
 
-        # Store in all results
         all_fold_results[fold_idx] = fold_evaluation_results
 
         # Save results
         save_evaluation_results(eval_results, predictions,
-                                targets, fold_idx, "./log_normalized")
-        plot_training_curves(train_losses, test_losses,
-                             fold_idx, "./log_normalized", epoch_mean_gene_corrs=epoch_mean_gene_corrs)
+                                targets, fold_idx, results_dir)
+        plot_training_curves(train_losses, test_losses, fold_idx, results_dir, epoch_mean_gene_corrs=epoch_mean_gene_corrs)
 
-        # Plot fold-level per-gene Pearson distribution
+        # Plot fold-level gene correlation distribution
         plot_fold_gene_correlation_distribution(
-            eval_results.get('gene_correlations'), fold_idx, "./log_normalized")
+            eval_results.get('gene_correlations'), fold_idx, results_dir)
 
-        # Save temporary results (in case of interruption)
+        # Save temporary results
         with open(temp_results_file, 'w') as f:
             json.dump(all_fold_results, f, indent=2,
                       default=convert_numpy_types)
@@ -312,12 +327,12 @@ def main():
         torch.cuda.empty_cache()
 
     # Final summary
-    print(f"\n{'='*60}")
+    print(f"\n{'='*70}")
     if cv_mode == "kfold":
-        print(f"10-FOLD CROSS VALIDATION COMPLETED")
+        print(f"10-FOLD CROSS VALIDATION WITH TRANSFER LEARNING COMPLETED")
     else:
-        print(f"LEAVE-ONE-OUT CROSS VALIDATION COMPLETED")
-    print(f"{'='*60}")
+        print(f"LEAVE-ONE-OUT CROSS VALIDATION WITH TRANSFER LEARNING COMPLETED")
+    print(f"{'='*70}")
 
     # Calculate overall statistics
     overall_correlations = []
@@ -338,13 +353,16 @@ def main():
         f"Average final test loss: {np.mean(final_test_losses):.6f} ± {np.std(final_test_losses):.6f}")
 
     # Save final results
-    final_results_file = "./log_normalized/final_10fold_results.json" if cv_mode == "kfold" else "./log_normalized/final_loo_results.json"
+    final_results_file = f"{results_dir}/final_10fold_results.json" if cv_mode == "kfold" else f"{results_dir}/final_loo_results.json"
     with open(final_results_file, 'w') as f:
         json.dump(all_fold_results, f, indent=2, default=convert_numpy_types)
 
-    print(f"\nFinal results saved to: {final_results_file}")
-    print("Training completed successfully!")
+    print(f"\n✓ Final results saved to: {final_results_file}")
+    print("✓ Transfer learning training completed successfully!")
+    print(f"✓ Transfer strategy: {transfer_strategy}")
+    print(f"✓ Results directory: {results_dir}")
 
 
 if __name__ == "__main__":
     main()
+

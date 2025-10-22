@@ -187,6 +187,47 @@ def evaluate_model_metrics(model, data_loader, device):
     return results, all_predictions, all_targets
 
 
+def pearson_correlation_loss(predictions: torch.Tensor, targets: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """
+    Differentiable Pearson correlation loss computed across the batch dimension per gene.
+
+    Args:
+        predictions: Tensor of shape [batch_size, num_genes]
+        targets: Tensor of shape [batch_size, num_genes]
+        eps: Numerical stability constant
+
+    Returns:
+        Scalar tensor representing 1 - mean_pearson_across_genes
+    """
+    if predictions.ndim != 2 or targets.ndim != 2:
+        # Fallback: flatten to [N, G]-like shape if possible
+        pred_flat = predictions.view(predictions.size(0), -1)
+        targ_flat = targets.view(targets.size(0), -1)
+    else:
+        pred_flat = predictions
+        targ_flat = targets
+
+    pred_centered = pred_flat - pred_flat.mean(dim=0, keepdim=True)
+    targ_centered = targ_flat - targ_flat.mean(dim=0, keepdim=True)
+
+    pred_var = (pred_centered.pow(2).sum(dim=0))
+    targ_var = (targ_centered.pow(2).sum(dim=0))
+
+    denom = (pred_var * targ_var).clamp_min(eps).sqrt()
+    numer = (pred_centered * targ_centered).sum(dim=0)
+
+    corr_per_gene = numer / (denom + eps)
+
+    # Mask out degenerate genes with near-zero variance to avoid noisy gradients
+    valid_mask = (pred_var > eps) & (targ_var > eps)
+    if valid_mask.any():
+        mean_corr = corr_per_gene[valid_mask].mean()
+    else:
+        mean_corr = corr_per_gene.mean()
+
+    return 1.0 - mean_corr
+
+
 def save_evaluation_results(results, predictions, targets, fold_idx, save_dir="./logs"):
     """
     Save evaluation results to files
@@ -216,22 +257,51 @@ def save_evaluation_results(results, predictions, targets, fold_idx, save_dir=".
     print(f"Results saved to {save_dir}")
 
 
-def plot_training_curves(train_losses, test_losses, fold_idx, save_dir="./logs"):
+def plot_training_curves(train_losses, test_losses, fold_idx, save_dir="./logs", epoch_mean_gene_corrs=None):
     """
     Plot training and test loss curves
     """
     os.makedirs(save_dir, exist_ok=True)
 
     plt.figure(figsize=(10, 6))
-    plt.plot(train_losses, label='Train Loss', color='blue')
-    plt.plot(test_losses, label='Test Loss', color='red')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title(f'Training Curves - Fold {fold_idx}')
-    plt.legend()
-    plt.grid(True)
+    ax1 = plt.gca()
+    ax1.plot(train_losses, label='Train Loss', color='blue')
+    ax1.plot(test_losses, label='Test Loss', color='red')
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Loss')
+    ax1.set_title(f'Training Curves - Fold {fold_idx}')
+    ax1.grid(True)
 
+    if epoch_mean_gene_corrs is not None and len(epoch_mean_gene_corrs) > 0:
+        ax2 = ax1.twinx()
+        ax2.plot(epoch_mean_gene_corrs, label='Mean Gene Pearson', color='green')
+        ax2.set_ylabel('Pearson (mean per gene)')
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='best')
+    else:
+        ax1.legend(loc='best')
+
+    plt.tight_layout()
     plt.savefig(os.path.join(save_dir, f"fold_{fold_idx}_training_curves.png"))
+    plt.close()
+
+
+def plot_fold_gene_correlation_distribution(gene_correlations, fold_idx, save_dir="./logs"):
+    """
+    Plot distribution of per-gene Pearson correlations for a fold.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    if gene_correlations is None or len(gene_correlations) == 0:
+        return
+    plt.figure(figsize=(8, 5))
+    sns.histplot(gene_correlations, bins=30, kde=True, color='purple')
+    plt.xlabel('Per-Gene Pearson Correlation')
+    plt.ylabel('Count')
+    plt.title(f'Gene Correlation Distribution - Fold {fold_idx}')
+    plt.grid(True, axis='y', alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, f"fold_{fold_idx}_gene_correlation_hist.png"))
     plt.close()
 
 
