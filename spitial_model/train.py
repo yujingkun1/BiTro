@@ -53,15 +53,15 @@ def main():
     # Specify gene file
     gene_file = "/data/yujk/hovernet2feature/HEST/tutorials/SA_process/common_genes_misc_tenx_zen_897.txt"
 
-    batch_size = 16
+    batch_size = 128
     num_epochs = 70
-    learning_rate = 1e-6  
+    learning_rate = 1e-4  
     weight_decay = 1e-5   # 恢复正常weight_decay
     feature_dim = 128
 
     # 迁移学习配置
     use_transfer_learning = os.environ.get(
-        "USE_TRANSFER_LEARNING", "true").lower() == "true"
+        "USE_TRANSFER_LEARNING", "false").lower() == "true"
     bulk_model_path = "/data/yujk/hovernet2feature/best_bulk_static_372_optimized_model.pt"
     freeze_backbone = os.environ.get(
         "FREEZE_BACKBONE", "false").lower() == "true"
@@ -75,8 +75,6 @@ def main():
     cv_mode = os.environ.get("CV_MODE", "kfold")
     start_fold = 0  # only used for kfold
 
-    # Pearson correlation weight in mixed loss (MSE + pearson_weight * PearsonLoss)
-    pearson_weight = float(os.environ.get("PEARSON_WEIGHT", "0.6"))
 
     print("=== HEST Spatial Supervised Training ===")
     print("✓ Using direct file reading (no HEST API required)")
@@ -91,10 +89,21 @@ def main():
     if cv_mode == "kfold":
         print(f"✓ Starting from Fold {start_fold + 1}")
 
-    print(f"✓ Loss: MSE + {pearson_weight:.2f} * PearsonLoss (mixed loss)")
+    print(f"✓ Loss: MSE (pure)")
 
     # Setup device
     device = setup_device(device_id=1)
+
+    # Math/precision optimizations
+    try:
+        torch.set_float32_matmul_precision('high')
+    except Exception:
+        pass
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    except Exception:
+        pass
 
     # Create results directory
     os.makedirs("./log_normalized", exist_ok=True)
@@ -198,14 +207,12 @@ def main():
             gene_file=gene_file
         )
 
-        # Create data loaders (reduce memory pressure)
+        # Create data loaders (defaults; simpler for stability)
         train_loader = DataLoader(
             train_dataset,
             batch_size=batch_size,
             shuffle=True,
             collate_fn=collate_fn_hest_graph,
-            num_workers=0,  # Avoid multi-process memory issues
-            pin_memory=False,  # Reduce memory usage
         )
 
         test_loader = DataLoader(
@@ -213,8 +220,6 @@ def main():
             batch_size=batch_size,
             shuffle=False,
             collate_fn=collate_fn_hest_graph,
-            num_workers=0,  # Avoid multi-process memory issues
-            pin_memory=False,  # Reduce memory usage
         )
 
         num_genes = train_dataset.num_genes
@@ -243,13 +248,12 @@ def main():
         print(f"Batch size: {batch_size}, Epochs: {num_epochs}")
         print(f"Early stopping: patience={patience}, min_delta={min_delta}")
 
-        print(f"Loss: MSE + {pearson_weight:.2f} * PearsonLoss (mixed loss)")
+        print(f"Loss: MSE (pure)")
 
         # Train model
         train_losses, test_losses, epoch_mean_gene_corrs = train_hest_graph_model(
             model, train_loader, test_loader, optimizer, scheduler,
-            num_epochs=num_epochs, device=device, patience=patience, min_delta=min_delta, fold_idx=fold_idx,
-            pearson_weight=pearson_weight
+            num_epochs=num_epochs, device=device, patience=patience, min_delta=min_delta, fold_idx=fold_idx
         )
 
         # Load best model for evaluation

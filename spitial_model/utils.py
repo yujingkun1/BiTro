@@ -187,45 +187,7 @@ def evaluate_model_metrics(model, data_loader, device):
     return results, all_predictions, all_targets
 
 
-def pearson_correlation_loss(predictions: torch.Tensor, targets: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """
-    Differentiable Pearson correlation loss computed across the batch dimension per gene.
-
-    Args:
-        predictions: Tensor of shape [batch_size, num_genes]
-        targets: Tensor of shape [batch_size, num_genes]
-        eps: Numerical stability constant
-
-    Returns:
-        Scalar tensor representing 1 - mean_pearson_across_genes
-    """
-    if predictions.ndim != 2 or targets.ndim != 2:
-        # Fallback: flatten to [N, G]-like shape if possible
-        pred_flat = predictions.view(predictions.size(0), -1)
-        targ_flat = targets.view(targets.size(0), -1)
-    else:
-        pred_flat = predictions
-        targ_flat = targets
-
-    pred_centered = pred_flat - pred_flat.mean(dim=0, keepdim=True)
-    targ_centered = targ_flat - targ_flat.mean(dim=0, keepdim=True)
-
-    pred_var = (pred_centered.pow(2).sum(dim=0))
-    targ_var = (targ_centered.pow(2).sum(dim=0))
-
-    denom = (pred_var * targ_var).clamp_min(eps).sqrt()
-    numer = (pred_centered * targ_centered).sum(dim=0)
-
-    corr_per_gene = numer / (denom + eps)
-
-    # Mask out degenerate genes with near-zero variance to avoid noisy gradients
-    valid_mask = (pred_var > eps) & (targ_var > eps)
-    if valid_mask.any():
-        mean_corr = corr_per_gene[valid_mask].mean()
-    else:
-        mean_corr = corr_per_gene.mean()
-
-    return 1.0 - mean_corr
+# Pearson correlation loss removed: training now uses pure MSE. Pearson metrics are computed only for evaluation.
 
 
 def save_evaluation_results(results, predictions, targets, fold_idx, save_dir="./logs"):

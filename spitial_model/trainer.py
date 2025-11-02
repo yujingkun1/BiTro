@@ -15,8 +15,7 @@ warnings.filterwarnings("ignore")
 
 
 def train_hest_graph_model(model, train_loader, test_loader, optimizer, scheduler=None,
-                           num_epochs=100, device="cuda", patience=10, min_delta=1e-6, fold_idx=None,
-                           pearson_weight: float = 0.6):
+                           num_epochs=100, device="cuda", patience=10, min_delta=1e-6, fold_idx=None):
     """
     Training function for HEST graph model with early stopping
     """
@@ -27,7 +26,6 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
     best_loss = float('inf')
     best_test_loss = float('inf')
 
-    from .utils import pearson_correlation_loss
     # Early stopping variables
     early_stopping_counter = 0
     best_epoch = 0
@@ -53,7 +51,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
                     ncols=100, leave=False)
 
         for batch_idx, batch in pbar:
-            spot_expressions = batch["spot_expressions"].to(device)
+            spot_expressions = batch["spot_expressions"].to(device, non_blocking=True)
             spot_graphs = batch["spot_graphs"]
 
             optimizer.zero_grad()
@@ -75,10 +73,8 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
                     print(
                         f"  predictions.requires_grad: {predictions.requires_grad}")
 
-                # Calculate mixed loss in log space: MSE + lambda * PearsonLoss
-                mse_loss = criterion(predictions, spot_expressions)
-                pearson_loss = pearson_correlation_loss(predictions, spot_expressions)
-                loss = mse_loss + pearson_weight * pearson_loss
+                # Calculate loss in log space: pure MSE
+                loss = criterion(predictions, spot_expressions)
 
                 # Check for anomalous values
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -119,7 +115,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
         epoch_loss = running_loss / num_batches
         train_losses.append(epoch_loss)
 
-        # Calculate test loss (using pure MSE for comparability) and per-epoch Pearson
+        # Calculate test loss (pure MSE) and per-epoch Pearson (for monitoring only)
         from .utils import evaluate_model, evaluate_model_metrics
         test_loss = evaluate_model(model, test_loader, device)
         test_losses.append(test_loss)
@@ -210,8 +206,16 @@ def setup_model(feature_dim, num_genes, device, use_transfer_learning=False, bul
     """
     from .models import StaticGraphTransformerPredictor
     import os
+    import os as _os
 
     # Create model
+    # LoRA config via env (defaults enabled)
+    use_lora_adapters = (_os.environ.get("USE_LORA", "true").lower() == "true")
+    lora_r = int(_os.environ.get("LORA_R", "8"))
+    lora_alpha = int(_os.environ.get("LORA_ALPHA", "16"))
+    lora_dropout = float(_os.environ.get("LORA_DROPOUT", "0.05"))
+    lora_freeze_base = (_os.environ.get("LORA_FREEZE_BASE", "true").lower() == "true")
+
     model = StaticGraphTransformerPredictor(
         input_dim=feature_dim,
         gnn_hidden_dim=128,
@@ -223,8 +227,22 @@ def setup_model(feature_dim, num_genes, device, use_transfer_learning=False, bul
         dropout=0.3,
         use_gnn=True,
         gnn_type='GAT',
-        n_pos=128  # HIST2ST style positional encoding range
+        n_pos=128,  # HIST2ST style positional encoding range
+        use_lora=use_lora_adapters,
+        lora_r=lora_r,
+        lora_alpha=lora_alpha,
+        lora_dropout=lora_dropout,
+        lora_freeze_base=lora_freeze_base,
     )
+
+    # Optional: torch.compile for speedup on PyTorch 2.x
+    try:
+        use_compile = (_os.environ.get("USE_COMPILE", "false").lower() == "true")
+        if use_compile and hasattr(torch, "compile"):
+            model = torch.compile(model, mode="max-autotune")
+            print("✓ torch.compile enabled (max-autotune)")
+    except Exception as _e:
+        print(f"torch.compile not enabled: {_e}")
 
     # Load pretrained weights from bulkmodel if transfer learning is enabled
     if use_transfer_learning and bulk_model_path and os.path.exists(bulk_model_path):
