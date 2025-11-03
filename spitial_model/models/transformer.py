@@ -6,6 +6,7 @@ author: Jingkun Yu
 """
 
 import torch
+import math
 import torch.nn as nn
 from .gnn import StaticGraphGNN, GNN_AVAILABLE
 from .lora import apply_lora_to_linear_modules, LoRALinear, LoRAMultiheadSelfAttention
@@ -66,14 +67,26 @@ class StaticGraphTransformerPredictor(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        # output: using an mlp 
+        # output (legacy): per-node to G, then sum. Kept for shape references but not used in forward
         self.output_projection = nn.Sequential(
             nn.LayerNorm(embed_dim),
             nn.Linear(embed_dim, embed_dim // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(embed_dim // 2, num_genes),
-            nn.Softplus()  # 添加 Softplus 激活确保输出非负且数值稳定
+            nn.Softplus()
+        )
+
+        # Gene-specific attention readout: learn queries for each gene and a shared scalar head
+        self.gene_queries = nn.Parameter(torch.empty(num_genes, embed_dim))
+        nn.init.xavier_uniform_(self.gene_queries)
+        self.gene_readout = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim // 2, 1),
+            nn.Softplus()
         )
         
         # positional encoding
@@ -222,10 +235,16 @@ class StaticGraphTransformerPredictor(nn.Module):
             seq = (node_features + pos_enc).unsqueeze(0)  # [1, S, E]
             transformer_output = self.transformer(seq)  # [1, S, E]
 
-            # 输出映射并对序列求和得到图级别预测
-            cell_gene_predictions = self.output_projection(transformer_output)  # [1, S, G]
-            graph_prediction = cell_gene_predictions.sum(dim=1).squeeze(0)  # [G]
-            predictions.append(graph_prediction)
+            # Gene-specific attention aggregation over nodes
+            H = transformer_output.squeeze(0)  # [S, E]
+            # Attention weights per gene over S nodes: softmax(Q H^T / sqrt(E))
+            attn_logits = torch.matmul(self.gene_queries, H.transpose(0, 1)) / math.sqrt(self.embed_dim)  # [G, S]
+            attn_weights = torch.softmax(attn_logits, dim=1)  # [G, S]
+            # Pooled representation for each gene
+            Z = torch.matmul(attn_weights, H)  # [G, E]
+            # Shared scalar head per gene
+            y = self.gene_readout(Z).squeeze(-1)  # [G]
+            predictions.append(y)
 
         if not predictions:
             return torch.zeros(0, self.output_projection[-2].out_features, device=device)
