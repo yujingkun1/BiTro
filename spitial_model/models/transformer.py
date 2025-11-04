@@ -190,13 +190,15 @@ class StaticGraphTransformerPredictor(nn.Module):
         
         return pos_enc
         
-    def forward(self, batch_graphs, return_attention=False):
+    def forward(self, batch_graphs, return_attention=False, return_node_embeddings: bool = False):
         device = next(self.parameters()).device
         if not isinstance(batch_graphs, (list, tuple)) or len(batch_graphs) == 0:
             return torch.zeros(0, self.output_projection[-2].out_features, device=device)
         # 逐图处理，避免批量 padding 与掩码带来的复杂性
         predictions = []
-        for g in batch_graphs:
+        node_embeddings_list = []
+        processed_indices = []
+        for idx, g in enumerate(batch_graphs):
             if g is None:
                 continue
             # 将图相关张量移至设备
@@ -245,8 +247,20 @@ class StaticGraphTransformerPredictor(nn.Module):
             # Shared scalar head per gene
             y = self.gene_readout(Z).squeeze(-1)  # [G]
             predictions.append(y)
+            if return_node_embeddings:
+                node_embeddings_list.append(H)
+                processed_indices.append(idx)
 
         if not predictions:
+            if return_node_embeddings:
+                return (
+                    torch.zeros(0, self.output_projection[-2].out_features, device=device),
+                    [],
+                    []
+                )
             return torch.zeros(0, self.output_projection[-2].out_features, device=device)
 
-        return torch.stack(predictions, dim=0)  # [B, G]
+        pred_tensor = torch.stack(predictions, dim=0)  # [B, G]
+        if return_node_embeddings:
+            return pred_tensor, node_embeddings_list, processed_indices
+        return pred_tensor

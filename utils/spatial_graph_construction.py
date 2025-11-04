@@ -165,13 +165,26 @@ class HESTDirectReader:
                             positions = positions[:n_min]
                             n_feat = n_min
 
+                    # 读取可选的聚类标签（若已由聚类脚本写回）
+                    cluster_labels = None
+                    try:
+                        if 'cluster_labels' in data:
+                            cluster_labels = data['cluster_labels']
+                            # 类型与长度检查
+                            if getattr(cluster_labels, 'ndim', 1) != 1 or cluster_labels.shape[0] != features.shape[0]:
+                                print("    警告: cluster_labels 维度或长度与 features 不一致，将忽略")
+                                cluster_labels = None
+                    except Exception as _:
+                        cluster_labels = None
+
                     self.deep_features[sample_id] = {
                         'features': features,
                         'positions': positions,
                         'cell_index': cell_index,
                         'spot_ptr': spot_ptr,
                         'spot_index': spot_index,
-                        'metadata': metadata
+                        'metadata': metadata,
+                        'cluster_labels': cluster_labels
                     }
 
                     print(f"  - 特征形状: {features.shape}")
@@ -466,8 +479,14 @@ class HESTDirectReader:
                     edge_index = torch.empty((2, 0), dtype=torch.long)
                     pos = torch.tensor(
                         [[cell_row['x'], cell_row['y']]], dtype=torch.float32)
-
                     graph = Data(x=x, edge_index=edge_index, pos=pos)
+                    # 如果存在聚类标签，附加到图
+                    if deep is not None and deep.get('cluster_labels') is not None:
+                        cls = deep['cluster_labels']
+                        if cell_row.name < len(cls):
+                            graph.cluster_labels = torch.tensor([
+                                int(cls[cell_row.name])
+                            ], dtype=torch.long)
                     intra_spot_graphs[int(spot_idx)] = graph
                 continue
 
@@ -478,11 +497,13 @@ class HESTDirectReader:
                 self.extract_cell_feature_vector(row, sample_id, row.name)
                 for _, row in spot_cells.iterrows()
             ])
+            cluster_slice = None
 
             # 若深度特征提供了严格按spot划分的索引，且长度匹配，优先使用以避免对齐偏差
             if deep is not None and deep.get('features') is not None and deep.get('positions') is not None:
                 feats_np = deep['features']
                 pos_np = deep['positions']
+                cls_np = deep.get('cluster_labels')
                 if isinstance(group_by_spot, dict) and spot_idx in group_by_spot:
                     idxs = group_by_spot[spot_idx]
                     if isinstance(idxs, tuple):
@@ -490,12 +511,18 @@ class HESTDirectReader:
                         if 0 <= s < e <= feats_np.shape[0] and e <= pos_np.shape[0]:
                             positions = pos_np[s:e]
                             cell_features = feats_np[s:e]
+                            if cls_np is not None and e <= cls_np.shape[0]:
+                                cluster_slice = cls_np[s:e]
                     elif isinstance(idxs, list) and len(idxs) > 0:
                         idxs = [i for i in idxs if 0 <= i <
                                 feats_np.shape[0] and i < pos_np.shape[0]]
                         if idxs:
                             positions = pos_np[idxs]
                             cell_features = feats_np[idxs]
+                            if cls_np is not None:
+                                valid_cls = [i for i in idxs if i < cls_np.shape[0]]
+                                if len(valid_cls) == len(idxs):
+                                    cluster_slice = cls_np[idxs]
 
             # spot内所有细胞都可以连接，使用k近邻控制连接密度
             k = min(intra_spot_k_neighbors, len(spot_cells) - 1)
@@ -522,6 +549,14 @@ class HESTDirectReader:
             pos = torch.tensor(positions, dtype=torch.float32)
 
             graph = Data(x=x, edge_index=edge_index, pos=pos)
+            # 附加聚类标签（若可用且长度匹配）
+            if cluster_slice is not None:
+                try:
+                    cls_t = torch.as_tensor(cluster_slice, dtype=torch.long)
+                    if cls_t.dim() == 1 and cls_t.numel() == x.shape[0]:
+                        graph.cluster_labels = cls_t
+                except Exception:
+                    pass
             intra_spot_graphs[int(spot_idx)] = graph
 
         print(

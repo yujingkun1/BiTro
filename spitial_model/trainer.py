@@ -15,7 +15,8 @@ warnings.filterwarnings("ignore")
 
 
 def train_hest_graph_model(model, train_loader, test_loader, optimizer, scheduler=None,
-                           num_epochs=100, device="cuda", patience=10, min_delta=1e-6, fold_idx=None):
+                           num_epochs=100, device="cuda", patience=10, min_delta=1e-6, fold_idx=None,
+                           cluster_loss_weight: float = 0.1):
     """
     Training function for HEST graph model with early stopping
     """
@@ -33,12 +34,15 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
     train_losses = []
     test_losses = []
     epoch_mean_gene_corrs = []  # per-epoch mean gene Pearson on test set
+    epoch_overall_corrs = []    # per-epoch overall Pearson on test set
 
     print("=== Starting HEST Graph Training (with early stopping) ===")
     print(
         f"Early stopping settings: patience={patience}, min_delta={min_delta}")
     if fold_idx is not None:
         print(f"Current training: Fold {fold_idx + 1}")
+    if cluster_loss_weight and cluster_loss_weight > 0:
+        print(f"Using cluster regularization: weight={cluster_loss_weight}")
 
     for epoch in range(num_epochs):
         model.train()
@@ -60,8 +64,13 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
             skip_batch = False
 
             with autocast('cuda'):
-                # Forward pass
-                predictions = model(spot_graphs)
+                # Forward pass（返回节点嵌入用于聚类loss）
+                out = model(spot_graphs, return_node_embeddings=True)
+                if isinstance(out, tuple) and len(out) == 3:
+                    predictions, node_embeddings_list, processed_indices = out
+                else:
+                    predictions = out
+                    node_embeddings_list, processed_indices = [], list(range(len(spot_graphs)))
 
                 # 添加调试信息
                 if batch_idx == 0 and epoch == 0:
@@ -73,8 +82,45 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
                     print(
                         f"  predictions.requires_grad: {predictions.requires_grad}")
 
-                # Calculate loss in log space: pure MSE
-                loss = criterion(predictions, spot_expressions)
+                # 对齐targets与有效预测（如有跳过的图）
+                try:
+                    if predictions.shape[0] != spot_expressions.shape[0]:
+                        if processed_indices:
+                            spot_expressions = spot_expressions.index_select(0, torch.as_tensor(processed_indices, device=spot_expressions.device))
+                except Exception:
+                    pass
+
+                # Calculate loss in log space: pure MSE + 可选聚类loss
+                recon_loss = criterion(predictions, spot_expressions)
+
+                cluster_loss = torch.zeros((), device=predictions.device)
+                if cluster_loss_weight and cluster_loss_weight > 0 and node_embeddings_list:
+                    # 针对每个有效图，基于Transformer节点嵌入计算类内聚合损失
+                    for emb, gi in zip(node_embeddings_list, processed_indices):
+                        try:
+                            g = spot_graphs[gi]
+                            labels = getattr(g, 'cluster_labels', None)
+                            if labels is None:
+                                continue
+                            labels = labels.to(emb.device)
+                            if labels.dim() != 1 or labels.numel() != emb.size(0):
+                                continue
+                            # 对每个类别计算到类中心的平均距离
+                            unique = torch.unique(labels)
+                            for c in unique:
+                                # 忽略负标签（如占位）
+                                if c.item() < 0:
+                                    continue
+                                idx = (labels == c).nonzero(as_tuple=False).squeeze(1)
+                                if idx.numel() > 1:
+                                    cluster_feats = emb.index_select(0, idx)
+                                    centroid = cluster_feats.mean(dim=0)
+                                    distances = torch.norm(cluster_feats - centroid, dim=1)
+                                    cluster_loss = cluster_loss + distances.mean()
+                        except Exception:
+                            continue
+
+                loss = recon_loss + (cluster_loss_weight * cluster_loss if cluster_loss_weight and cluster_loss_weight > 0 else 0.0)
 
                 # Check for anomalous values
                 if torch.isnan(loss) or torch.isinf(loss):
@@ -124,9 +170,12 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
         try:
             metrics, _, _ = evaluate_model_metrics(model, test_loader, device)
             epoch_mean_gene_corr = float(metrics.get('mean_gene_correlation', 0.0))
+            epoch_overall_corr = float(metrics.get('overall_correlation', 0.0))
         except Exception:
             epoch_mean_gene_corr = 0.0
+            epoch_overall_corr = 0.0
         epoch_mean_gene_corrs.append(epoch_mean_gene_corr)
+        epoch_overall_corrs.append(epoch_overall_corr)
 
         # Learning rate scheduling
         if scheduler is not None:
@@ -136,6 +185,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
         print(f"Epoch {epoch+1}/{num_epochs}")
         print(f"  Train Loss: {epoch_loss:.6f}, Test Loss: {test_loss:.6f}")
         print(f"  Mean Gene Pearson: {epoch_mean_gene_corr:.6f}")
+        print(f"  Overall Pearson: {epoch_overall_corr:.6f}")
         print(f"  LR: {current_lr:.2e}")
 
         # 添加梯度范数监控
@@ -176,7 +226,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
     print(f"Best test loss: {best_test_loss:.6f} (Epoch {best_epoch})")
     print(f"Total epochs: {len(train_losses)}")
 
-    return train_losses, test_losses, epoch_mean_gene_corrs
+    return train_losses, test_losses, epoch_mean_gene_corrs, epoch_overall_corrs
 
 
 def setup_optimizer_and_scheduler(model, learning_rate=1e-3, weight_decay=1e-5, num_epochs=60):

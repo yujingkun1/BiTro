@@ -24,7 +24,7 @@ from torch.utils.data import DataLoader
 # Import from local spitial_model submodules
 from spitial_model.dataset import HESTSpatialDataset, collate_fn_hest_graph
 from spitial_model.trainer import train_hest_graph_model, setup_optimizer_and_scheduler, setup_model
-from spitial_model.utils import get_fold_samples, evaluate_model_metrics, save_evaluation_results, plot_training_curves, setup_device, plot_fold_gene_correlation_distribution
+from spitial_model.utils import get_fold_samples, evaluate_model_metrics, save_evaluation_results, plot_training_curves, setup_device, plot_fold_gene_correlation_distribution, plot_metric_across_folds
 # fmt: on
 
 warnings.filterwarnings("ignore")
@@ -54,8 +54,8 @@ def main():
     gene_file = "/data/yujk/hovernet2feature/HEST/tutorials/SA_process/common_genes_misc_tenx_zen_897.txt"
 
     batch_size = 128
-    num_epochs = 70
-    learning_rate = 1e-4  
+    num_epochs = 50
+    learning_rate = 3e-5  
     weight_decay = 1e-5   # 恢复正常weight_decay
     feature_dim = 128
 
@@ -67,7 +67,7 @@ def main():
         "FREEZE_BACKBONE", "false").lower() == "true"
 
     # Early stopping parameters
-    patience = 30
+    patience = 5
     min_delta = 1e-6
 
     # Cross-validation mode
@@ -89,7 +89,7 @@ def main():
     if cv_mode == "kfold":
         print(f"✓ Starting from Fold {start_fold + 1}")
 
-    print(f"✓ Loss: MSE (pure)")
+    print(f"✓ Loss: MSE + optional cluster regularizer")
 
     # Setup device
     device = setup_device(device_id=1)
@@ -248,12 +248,13 @@ def main():
         print(f"Batch size: {batch_size}, Epochs: {num_epochs}")
         print(f"Early stopping: patience={patience}, min_delta={min_delta}")
 
-        print(f"Loss: MSE (pure)")
+        print(f"Loss: MSE + cluster (weight=0.1)")
 
         # Train model
-        train_losses, test_losses, epoch_mean_gene_corrs = train_hest_graph_model(
+        train_losses, test_losses, epoch_mean_gene_corrs, epoch_overall_corrs = train_hest_graph_model(
             model, train_loader, test_loader, optimizer, scheduler,
-            num_epochs=num_epochs, device=device, patience=patience, min_delta=min_delta, fold_idx=fold_idx
+            num_epochs=num_epochs, device=device, patience=patience, min_delta=min_delta, fold_idx=fold_idx,
+            cluster_loss_weight=0.1
         )
 
         # Load best model for evaluation
@@ -265,6 +266,14 @@ def main():
         # Evaluate model performance
         eval_results, predictions, targets = evaluate_model_metrics(
             model, test_loader, device)
+
+        # Compute best pearsons during training epochs
+        best_overall_pearson = float(
+            max(epoch_overall_corrs) if epoch_overall_corrs else eval_results.get('overall_correlation', 0.0)
+        )
+        best_gene_pearson = float(
+            max(epoch_mean_gene_corrs) if epoch_mean_gene_corrs else eval_results.get('mean_gene_correlation', 0.0)
+        )
 
         # Save current fold's best model
         fold_model_path = f"./checkpoints/best_hest_graph_model_fold_{fold_idx}.pt"
@@ -283,7 +292,9 @@ def main():
             'test_losses': test_losses,
             'final_train_loss': train_losses[-1] if train_losses else None,
             'final_test_loss': test_losses[-1] if test_losses else None,
-            'eval_results': eval_results
+            'eval_results': eval_results,
+            'best_overall_pearson': best_overall_pearson,
+            'best_gene_pearson': best_gene_pearson
         }
 
         # Store in all results
@@ -293,11 +304,28 @@ def main():
         save_evaluation_results(eval_results, predictions,
                                 targets, fold_idx, "./log_normalized")
         plot_training_curves(train_losses, test_losses,
-                             fold_idx, "./log_normalized", epoch_mean_gene_corrs=epoch_mean_gene_corrs)
+                             fold_idx, "./log_normalized", epoch_mean_gene_corrs=epoch_mean_gene_corrs, epoch_overall_corrs=epoch_overall_corrs)
 
         # Plot fold-level per-gene Pearson distribution
         plot_fold_gene_correlation_distribution(
             eval_results.get('gene_correlations'), fold_idx, "./log_normalized")
+
+        # Persist per-fold best pearsons into a cumulative file
+        try:
+            best_metrics_file = "./log_normalized/fold_best_pearsons.json"
+            if os.path.exists(best_metrics_file):
+                with open(best_metrics_file, 'r') as f:
+                    cumulative_best = json.load(f)
+            else:
+                cumulative_best = {}
+            cumulative_best[str(fold_idx)] = {
+                'best_overall_pearson': best_overall_pearson,
+                'best_gene_pearson': best_gene_pearson
+            }
+            with open(best_metrics_file, 'w') as f:
+                json.dump(cumulative_best, f, indent=2, default=convert_numpy_types)
+        except Exception as e:
+            print(f"Warning: could not update fold_best_pearsons.json: {e}")
 
         # Save temporary results (in case of interruption)
         with open(temp_results_file, 'w') as f:
@@ -327,12 +355,16 @@ def main():
     overall_correlations = []
     mean_gene_correlations = []
     final_test_losses = []
+    best_overall_list = []
+    best_gene_list = []
 
     for fold_idx, results in all_fold_results.items():
         eval_results = results['eval_results']
         overall_correlations.append(eval_results['overall_correlation'])
         mean_gene_correlations.append(eval_results['mean_gene_correlation'])
         final_test_losses.append(results['final_test_loss'])
+        best_overall_list.append(results.get('best_overall_pearson', eval_results['overall_correlation']))
+        best_gene_list.append(results.get('best_gene_pearson', eval_results['mean_gene_correlation']))
 
     print(
         f"Average overall correlation: {np.mean(overall_correlations):.6f} ± {np.std(overall_correlations):.6f}")
@@ -341,12 +373,51 @@ def main():
     print(
         f"Average final test loss: {np.mean(final_test_losses):.6f} ± {np.std(final_test_losses):.6f}")
 
+    # Report averages of best pearsons across folds
+    if best_overall_list and best_gene_list:
+        print(
+            f"Average BEST overall correlation: {np.mean(best_overall_list):.6f} ± {np.std(best_overall_list):.6f}")
+        print(
+            f"Average BEST gene correlation: {np.mean(best_gene_list):.6f} ± {np.std(best_gene_list):.6f}")
+
     # Save final results
     final_results_file = "./log_normalized/final_10fold_results.json" if cv_mode == "kfold" else "./log_normalized/final_loo_results.json"
     with open(final_results_file, 'w') as f:
         json.dump(all_fold_results, f, indent=2, default=convert_numpy_types)
 
+    # Save final best pearson summary and plots
+    final_best_file = "./log_normalized/final_10fold_best_pearsons.json" if cv_mode == "kfold" else "./log_normalized/final_loo_best_pearsons.json"
+    try:
+        with open(final_best_file, 'w') as f:
+            json.dump({
+                'per_fold_best_overall_pearson': best_overall_list,
+                'per_fold_best_gene_pearson': best_gene_list,
+                'average_best_overall_pearson': float(np.mean(best_overall_list)) if best_overall_list else None,
+                'std_best_overall_pearson': float(np.std(best_overall_list)) if best_overall_list else None,
+                'average_best_gene_pearson': float(np.mean(best_gene_list)) if best_gene_list else None,
+                'std_best_gene_pearson': float(np.std(best_gene_list)) if best_gene_list else None,
+            }, f, indent=2, default=convert_numpy_types)
+    except Exception as e:
+        print(f"Warning: could not save final best pearsons summary: {e}")
+
+    # Plots across folds
+    try:
+        plot_metric_across_folds(best_overall_list,
+                                 title='Best Overall Pearson Across Folds',
+                                 ylabel='Best Overall Pearson',
+                                 filename='best_overall_pearson_across_folds.png',
+                                 save_dir='./log_normalized')
+        plot_metric_across_folds(best_gene_list,
+                                 title='Best Mean Gene Pearson Across Folds',
+                                 ylabel='Best Mean Gene Pearson',
+                                 filename='best_gene_pearson_across_folds.png',
+                                 save_dir='./log_normalized')
+    except Exception as e:
+        print(f"Warning: could not generate across-fold Pearson plots: {e}")
+
     print(f"\nFinal results saved to: {final_results_file}")
+    if os.path.exists(final_best_file):
+        print(f"Best pearson summary saved to: {final_best_file}")
     print("Training completed successfully!")
 
 

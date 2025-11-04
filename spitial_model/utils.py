@@ -219,7 +219,7 @@ def save_evaluation_results(results, predictions, targets, fold_idx, save_dir=".
     print(f"Results saved to {save_dir}")
 
 
-def plot_training_curves(train_losses, test_losses, fold_idx, save_dir="./logs", epoch_mean_gene_corrs=None):
+def plot_training_curves(train_losses, test_losses, fold_idx, save_dir="./logs", epoch_mean_gene_corrs=None, epoch_overall_corrs=None):
     """
     Plot training and test loss curves
     """
@@ -234,10 +234,22 @@ def plot_training_curves(train_losses, test_losses, fold_idx, save_dir="./logs",
     ax1.set_title(f'Training Curves - Fold {fold_idx}')
     ax1.grid(True)
 
+    have_right_axis = False
     if epoch_mean_gene_corrs is not None and len(epoch_mean_gene_corrs) > 0:
         ax2 = ax1.twinx()
         ax2.plot(epoch_mean_gene_corrs, label='Mean Gene Pearson', color='green')
-        ax2.set_ylabel('Pearson (mean per gene)')
+        ax2.set_ylabel('Pearson')
+        have_right_axis = True
+        if epoch_overall_corrs is not None and len(epoch_overall_corrs) > 0:
+            ax2.plot(epoch_overall_corrs, label='Overall Pearson', color='orange')
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='best')
+    elif epoch_overall_corrs is not None and len(epoch_overall_corrs) > 0:
+        ax2 = ax1.twinx()
+        ax2.plot(epoch_overall_corrs, label='Overall Pearson', color='orange')
+        ax2.set_ylabel('Pearson')
+        have_right_axis = True
         lines1, labels1 = ax1.get_legend_handles_labels()
         lines2, labels2 = ax2.get_legend_handles_labels()
         ax1.legend(lines1 + lines2, labels1 + labels2, loc='best')
@@ -264,6 +276,25 @@ def plot_fold_gene_correlation_distribution(gene_correlations, fold_idx, save_di
     plt.grid(True, axis='y', alpha=0.3)
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, f"fold_{fold_idx}_gene_correlation_hist.png"))
+    plt.close()
+
+
+def plot_metric_across_folds(values, title, ylabel, filename, save_dir="./logs"):
+    """
+    Plot a simple bar chart of a metric across folds.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    if values is None or len(values) == 0:
+        return
+    plt.figure(figsize=(10, 5))
+    xs = list(range(1, len(values) + 1))
+    sns.barplot(x=xs, y=values, color='steelblue')
+    plt.xlabel('Fold')
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.grid(True, axis='y', alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, filename))
     plt.close()
 
 
