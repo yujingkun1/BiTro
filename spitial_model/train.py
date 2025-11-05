@@ -56,7 +56,7 @@ def main():
 
     batch_size = 128
     num_epochs = 50
-    learning_rate = 3e-5  
+    learning_rate = 3e-5
     weight_decay = 1e-5   # 恢复正常weight_decay
     feature_dim = 128
 
@@ -75,7 +75,6 @@ def main():
     # options: "kfold" (existing 10-fold) or "loo" (leave-one-out)
     cv_mode = os.environ.get("CV_MODE", "kfold")
     start_fold = 0  # only used for kfold
-
 
     print("=== HEST Spatial Supervised Training ===")
     print("✓ Using direct file reading (no HEST API required)")
@@ -270,10 +269,12 @@ def main():
 
         # Compute best pearsons during training epochs
         best_overall_pearson = float(
-            max(epoch_overall_corrs) if epoch_overall_corrs else eval_results.get('overall_correlation', 0.0)
+            max(epoch_overall_corrs) if epoch_overall_corrs else eval_results.get(
+                'overall_correlation', 0.0)
         )
         best_gene_pearson = float(
-            max(epoch_mean_gene_corrs) if epoch_mean_gene_corrs else eval_results.get('mean_gene_correlation', 0.0)
+            max(epoch_mean_gene_corrs) if epoch_mean_gene_corrs else eval_results.get(
+                'mean_gene_correlation', 0.0)
         )
 
         # Save current fold's best model
@@ -324,7 +325,8 @@ def main():
                 'best_gene_pearson': best_gene_pearson
             }
             with open(best_metrics_file, 'w') as f:
-                json.dump(cumulative_best, f, indent=2, default=convert_numpy_types)
+                json.dump(cumulative_best, f, indent=2,
+                          default=convert_numpy_types)
         except Exception as e:
             print(f"Warning: could not update fold_best_pearsons.json: {e}")
 
@@ -364,8 +366,10 @@ def main():
         overall_correlations.append(eval_results['overall_correlation'])
         mean_gene_correlations.append(eval_results['mean_gene_correlation'])
         final_test_losses.append(results['final_test_loss'])
-        best_overall_list.append(results.get('best_overall_pearson', eval_results['overall_correlation']))
-        best_gene_list.append(results.get('best_gene_pearson', eval_results['mean_gene_correlation']))
+        best_overall_list.append(results.get(
+            'best_overall_pearson', eval_results['overall_correlation']))
+        best_gene_list.append(results.get(
+            'best_gene_pearson', eval_results['mean_gene_correlation']))
 
     print(
         f"Average overall correlation: {np.mean(overall_correlations):.6f} ± {np.std(overall_correlations):.6f}")

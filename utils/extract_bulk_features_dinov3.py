@@ -11,6 +11,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from skimage import measure
 from multiprocessing import Pool, cpu_count, set_start_method
+import multiprocessing as mp
 import pyarrow as pa
 import pyarrow.parquet as pq
 from tqdm import tqdm
@@ -50,8 +51,39 @@ logging.info(f"PyTorch version: {torch.__version__}")
 print(f"CUDA available: {torch.cuda.is_available()}")
 logging.info(f"CUDA available: {torch.cuda.is_available()}")
 if torch.cuda.is_available():
-    print(f"GPU: {torch.cuda.get_device_name(1)}")
-    logging.info(f"GPU: {torch.cuda.get_device_name(1)}")
+    try:
+        visible = torch.cuda.device_count()
+        names = ", ".join([torch.cuda.get_device_name(i) for i in range(visible)])
+        print(f"GPUs ({visible}): {names}")
+        logging.info(f"GPUs ({visible}): {names}")
+    except Exception:
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+        logging.info(f"GPU: {torch.cuda.get_device_name(0)}")
+
+# Global worker and model cache for multi-GPU inference
+_WORKER_RANK = None
+_WORKER_DEVICE = None
+_MODEL_CACHE = {}
+
+def _init_worker():
+    """Initializer for worker processes to assign a fixed CUDA device per worker."""
+    global _WORKER_RANK, _WORKER_DEVICE
+    try:
+        ident = mp.current_process()._identity
+        rank = (ident[0] - 1) if ident else 0
+    except Exception:
+        rank = 0
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    if num_gpus > 0:
+        dev_index = rank % num_gpus
+        _WORKER_DEVICE = f"cuda:{dev_index}"
+        try:
+            torch.cuda.set_device(dev_index)
+        except Exception:
+            pass
+    else:
+        _WORKER_DEVICE = "cpu"
+    _WORKER_RANK = rank
 
 def load_image(image_path):
     """Load an image from the given path."""
@@ -62,7 +94,7 @@ def load_image(image_path):
 
 def extract_features_for_image(args):
     """Extract raw features for a single image patch without PCA."""
-    image_path, json_path, mat_path, model_name, processed_log = args
+    image_path, json_path, mat_path, model_name, processed_log, batch_size = args
     image_name = os.path.splitext(os.path.basename(image_path))[0]  # e.g., "TCGA-AA-3979-01A-01-TS1..._patch_001"
     wsi_name = os.path.basename(os.path.dirname(image_path))
     
@@ -76,11 +108,16 @@ def extract_features_for_image(args):
         mat_data = sio.loadmat(mat_path)
         inst_map = mat_data['inst_map']
         
-        # Load pre-trained model
-        model, original_feature_dim = get_feature_extractor(model_name)
-        model.eval()
-        if torch.cuda.is_available():
-            model = model.to('cuda')
+        # Prepare model once per worker/device
+        global _MODEL_CACHE, _WORKER_DEVICE
+        device = _WORKER_DEVICE if _WORKER_DEVICE else ('cuda:0' if torch.cuda.is_available() else 'cpu')
+        if device not in _MODEL_CACHE:
+            model, original_feature_dim = get_feature_extractor(model_name)
+            model.eval()
+            if torch.cuda.is_available() and device.startswith('cuda'):
+                model = model.to(device)
+            _MODEL_CACHE[device] = (model, original_feature_dim)
+        model, original_feature_dim = _MODEL_CACHE[device]
         preprocess = get_preprocess_transform()
         
         # Extract cell features
@@ -88,57 +125,74 @@ def extract_features_for_image(args):
         unique_ids = np.unique(inst_map)
         unique_ids = unique_ids[unique_ids > 0]
         
-        with torch.no_grad():
-            for cell_id in unique_ids:
-                cell_mask = (inst_map == cell_id).astype(np.uint8)
-                props = measure.regionprops(cell_mask)[0]
-                y_min, x_min, y_max, x_max = props.bbox
-                centroid_y, centroid_x = props.centroid
+        # Batched inference for higher GPU utilization
+        batch_inputs = []
+        batch_meta_ids = []
+        batch_meta_locs = []
+        batch_meta_sizes = []
 
-                cell_roi = original_img[y_min:y_max, x_min:x_max].copy()
-                mask_roi = cell_mask[y_min:y_max, x_min:x_max]
-                masked_cell = np.zeros_like(cell_roi)
-                masked_cell[mask_roi == 1] = cell_roi[mask_roi == 1]
-
-                if masked_cell.shape[0] < 10 or masked_cell.shape[1] < 10:
-                    continue
-
-                cell_pil = Image.fromarray(masked_cell)
-                input_tensor = preprocess(cell_pil).unsqueeze(0)
-                if torch.cuda.is_available():
-                    input_tensor = input_tensor.to('cuda')
-                
-                # Extract features using DinoV3
-                if torch.cuda.is_available():
+        def flush_batch():
+            nonlocal batch_inputs, batch_meta_ids, batch_meta_locs, batch_meta_sizes
+            if not batch_inputs:
+                return
+            batch_tensor = torch.stack(batch_inputs, dim=0)
+            if torch.cuda.is_available() and device.startswith('cuda'):
+                batch_tensor = batch_tensor.to(device, non_blocking=True)
+            with torch.inference_mode():
+                if torch.cuda.is_available() and device.startswith('cuda'):
                     with torch.amp.autocast('cuda'):
-                        batch_features = model(input_tensor)
-                        # 如果返回的是tuple，取第一个元素
-                        if isinstance(batch_features, tuple):
-                            batch_features = batch_features[0]
-                        # 如果是4D tensor (batch, channels, height, width)，取global average pooling
-                        if len(batch_features.shape) == 4:
-                            batch_features = batch_features.mean(dim=[2, 3])  # Global average pooling
-                        elif len(batch_features.shape) == 3:
-                            batch_features = batch_features.mean(dim=1)  # 平均token特征
-                        features = batch_features.squeeze().flatten().cpu().numpy()
+                        out = model(batch_tensor)
                 else:
-                    batch_features = model(input_tensor)
-                    if isinstance(batch_features, tuple):
-                        batch_features = batch_features[0]
-                    if len(batch_features.shape) == 4:
-                        batch_features = batch_features.mean(dim=[2, 3])
-                    elif len(batch_features.shape) == 3:
-                        batch_features = batch_features.mean(dim=1)
-                    features = batch_features.squeeze().flatten().cpu().numpy()
-                
-                # 检查并清理NaN/Inf值
+                    out = model(batch_tensor)
+                if isinstance(out, tuple):
+                    out = out[0]
+                if len(out.shape) == 4:
+                    out = out.mean(dim=[2, 3])
+                elif len(out.shape) == 3:
+                    out = out.mean(dim=1)
+                out_np = out.detach().cpu().numpy()
+            for i in range(out_np.shape[0]):
+                features = out_np[i]
                 if np.isnan(features).any() or np.isinf(features).any():
                     features = np.nan_to_num(features, nan=0.0, posinf=1.0, neginf=-1.0)
-                
                 cell_features.append(features)
-                cell_ids.append(int(cell_id))
-                cell_locations.append((centroid_x, centroid_y))
-                cell_sizes.append((props.area, props.perimeter))
+                cell_ids.append(int(batch_meta_ids[i]))
+                cell_locations.append(batch_meta_locs[i])
+                cell_sizes.append(batch_meta_sizes[i])
+            batch_inputs = []
+            batch_meta_ids = []
+            batch_meta_locs = []
+            batch_meta_sizes = []
+
+        for cell_id in unique_ids:
+            cell_mask = (inst_map == cell_id).astype(np.uint8)
+            props = measure.regionprops(cell_mask)[0]
+            y_min, x_min, y_max, x_max = props.bbox
+            centroid_y, centroid_x = props.centroid
+
+            cell_roi = original_img[y_min:y_max, x_min:x_max].copy()
+            mask_roi = cell_mask[y_min:y_max, x_min:x_max]
+            masked_cell = np.zeros_like(cell_roi)
+            masked_cell[mask_roi == 1] = cell_roi[mask_roi == 1]
+
+            if masked_cell.shape[0] < 10 or masked_cell.shape[1] < 10:
+                continue
+
+            cell_pil = Image.fromarray(masked_cell)
+            input_tensor = preprocess(cell_pil)
+            # Keep on CPU for now; move as a stacked batch
+            if torch.cuda.is_available() and device.startswith('cuda'):
+                input_tensor = input_tensor.pin_memory()
+            batch_inputs.append(input_tensor)
+            batch_meta_ids.append(int(cell_id))
+            batch_meta_locs.append((centroid_x, centroid_y))
+            batch_meta_sizes.append((props.area, props.perimeter))
+
+            if len(batch_inputs) >= batch_size:
+                flush_batch()
+
+        # Flush remaining
+        flush_batch()
         
         # Log processed file
         with open(processed_log, 'a') as f:
@@ -158,8 +212,8 @@ def get_feature_extractor(model_name):
         raise ImportError("DINOv3不可用，请安装transformers")
     
     # 设置 DINOv3 模型路径
-    dinov3_model_path = "/data/yujk/hovernet2feature/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
-    dinov3_repo_dir = "/data/yujk/hovernet2feature/dinov3"
+    dinov3_model_path = "/data/hdd1/yujk/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+    dinov3_repo_dir = "/data/hdd1/yujk/dinov3"
     
     if not os.path.exists(dinov3_model_path):
         raise RuntimeError(f"DINOv3模型文件不存在: {dinov3_model_path}")
@@ -251,7 +305,7 @@ def get_preprocess_transform():
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
-def process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder, model_name, pca_components, chunk_size):
+def process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder, model_name, pca_components, chunk_size, batch_size):
     """Process all patches for a single WSI and save as one Parquet file with PCA."""
     print(f"\n{'='*60}")
     print(f"Processing WSI: {wsi_name}")
@@ -259,8 +313,10 @@ def process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder, mode
     
     logging.info(f"Processing WSI: {wsi_name}")
     
-    json_wsi_path = os.path.join(json_folder, wsi_name)
-    mat_wsi_path = os.path.join(mat_folder, wsi_name)
+    # 你的目录结构为:  /.../output/<WSI>/{json, mat}
+    # 因此这里拼接到每个 WSI 的 json/mat 子目录
+    json_wsi_path = os.path.join(json_folder, wsi_name, 'json')
+    mat_wsi_path = os.path.join(mat_folder, wsi_name, 'mat')
     
     if not os.path.isdir(json_wsi_path) or not os.path.isdir(mat_wsi_path):
         logging.warning(f"Missing json or mat folder for {wsi_name}, skipping.")
@@ -288,7 +344,7 @@ def process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder, mode
             continue
         
         if image_path not in processed_patches:
-            args_list.append((image_path, json_path, mat_path, model_name, processed_log))
+            args_list.append((image_path, json_path, mat_path, model_name, processed_log, batch_size))
     
     if not args_list:
         print(f"All patches already processed for {wsi_name}")
@@ -313,7 +369,10 @@ def process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder, mode
         print(f"\nProcessing chunk {chunk_num}/{total_chunks} ({len(chunk_args)} patches)...")
         
         try:
-            with Pool(min(cpu_count(), 4)) as pool:
+            # Use one worker per GPU to maximize GPU utilization; fallback to CPU workers if no CUDA
+            gpu_workers = torch.cuda.device_count() if torch.cuda.is_available() else 0
+            num_workers = gpu_workers if gpu_workers > 0 else min(cpu_count(), 4)
+            with Pool(processes=num_workers, initializer=_init_worker) as pool:
                 results = list(tqdm(pool.imap(extract_features_for_image, chunk_args), 
                                    total=len(chunk_args), desc="Extracting Features"))
             
@@ -387,7 +446,7 @@ def process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder, mode
         logging.info(f"No data to save for WSI {wsi_name}")
         print(f"No data to save for WSI {wsi_name}")
 
-def batch_extract_features(image_folder, json_folder, mat_folder, output_folder, model_name='dinov3', pca_components=128, chunk_size=100):
+def batch_extract_features(image_folder, json_folder, mat_folder, output_folder, model_name='dinov3', pca_components=128, chunk_size=100, batch_size=64):
     """Process all WSIs and manage the extraction process."""
     print(f"\n{'='*80}")
     print(f"DinoV3 Feature Extraction Pipeline")
@@ -399,6 +458,7 @@ def batch_extract_features(image_folder, json_folder, mat_folder, output_folder,
     print(f"Model: {model_name}")
     print(f"PCA components: {pca_components}")
     print(f"Chunk size: {chunk_size}")
+    print(f"Batch size (cells): {batch_size}")
     
     os.makedirs(output_folder, exist_ok=True)
     processed_wsi_log = os.path.join(output_folder, "processed_wsi.log")
@@ -430,7 +490,7 @@ def batch_extract_features(image_folder, json_folder, mat_folder, output_folder,
         print(f"\nWSI Progress: {idx+1}/{len(remaining_wsi)}")
         
         wsi_path = os.path.join(image_folder, wsi_name)
-        process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder, model_name, pca_components, chunk_size)
+        process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder, model_name, pca_components, chunk_size, batch_size)
         
         # Mark WSI as processed
         with open(processed_wsi_log, 'a') as f:
@@ -439,10 +499,11 @@ def batch_extract_features(image_folder, json_folder, mat_folder, output_folder,
     print(f"\nAll processing completed!")
 
 if __name__ == "__main__":
-    image_folder = "./output_patches"
-    json_folder = "./output/json"
-    mat_folder = "./output/mat"
-    output_folder = "./extracted_features_dinov3"
+    # 统一使用绝对路径，且 json_folder / mat_folder 指向 output 根目录
+    image_folder = "/data/hdd1/yujk/hovernet-with-feature-extract/output_patches"
+    json_folder = "/data/hdd1/yujk/hovernet-with-feature-extract/output"
+    mat_folder = "/data/hdd1/yujk/hovernet-with-feature-extract/output"
+    output_folder = "/data/hdd1/yujk/extracted_features_dinov3"
     
     batch_extract_features(
         image_folder=image_folder,
@@ -451,5 +512,6 @@ if __name__ == "__main__":
         output_folder=output_folder,
         model_name='dinov3',  # Changed to dinov3
         pca_components=128,
-        chunk_size=100
+        chunk_size=100,
+        batch_size=128
     )
