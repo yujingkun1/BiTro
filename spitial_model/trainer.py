@@ -30,6 +30,8 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
     # Early stopping variables
     early_stopping_counter = 0
     best_epoch = 0
+    # 最小启用早停的epoch阈值（每个fold在20个epoch之后才启动早停）
+    min_early_stop_epoch = 20
 
     train_losses = []
     test_losses = []
@@ -39,6 +41,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
     print("=== Starting HEST Graph Training (with early stopping) ===")
     print(
         f"Early stopping settings: patience={patience}, min_delta={min_delta}")
+    print(f"Early stopping active after epoch: {min_early_stop_epoch}")
     if fold_idx is not None:
         print(f"Current training: Fold {fold_idx + 1}")
     if cluster_loss_weight and cluster_loss_weight > 0:
@@ -210,17 +213,20 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
                 f"  *** Saving best model (Test Loss: {best_test_loss:.6f}, Epoch: {best_epoch}) ***")
         else:
             # Test loss has no significant improvement
-            early_stopping_counter += 1
-            print(
-                f"  Early stopping counter: {early_stopping_counter}/{patience}")
+            if (epoch + 1) >= min_early_stop_epoch:
+                early_stopping_counter += 1
+                print(
+                    f"  Early stopping counter: {early_stopping_counter}/{patience} (active since epoch {min_early_stop_epoch})")
 
-            if early_stopping_counter >= patience:
-                print(f"\n*** Early stopping triggered! ***")
-                print(
-                    f"Test loss did not improve for {patience} epochs (min_delta={min_delta})")
-                print(
-                    f"Best test loss: {best_test_loss:.6f} (Epoch {best_epoch})")
-                break
+                if early_stopping_counter >= patience:
+                    print(f"\n*** Early stopping triggered! ***")
+                    print(
+                        f"Test loss did not improve for {patience} epochs (min_delta={min_delta})")
+                    print(
+                        f"Best test loss: {best_test_loss:.6f} (Epoch {best_epoch})")
+                    break
+            else:
+                print(f"  Early stopping inactive until epoch {min_early_stop_epoch}")
 
     print(f"\n=== Training completed ===")
     print(f"Best test loss: {best_test_loss:.6f} (Epoch {best_epoch})")
