@@ -56,7 +56,7 @@ def main():
 
     batch_size = 128
     num_epochs = 50
-    learning_rate = 3e-5
+    learning_rate = 1e-4
     weight_decay = 1e-5   # 恢复正常weight_decay
     feature_dim = 128
 

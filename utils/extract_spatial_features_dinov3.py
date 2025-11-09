@@ -1200,8 +1200,14 @@ def is_sample_completed(output_dir, sample_id):
     return os.path.exists(output_file) and os.path.exists(pca_file)
 
 
-def main_independent_pca_extraction():
-    """主函数：空转数据独立PCA特征提取（每例独立PCA）- 支持断点续传"""
+def main_independent_pca_extraction(target_samples=None):
+    """主函数：空转数据独立PCA特征提取（每例独立PCA）- 支持断点续传和指定样本
+    
+    Args:
+        target_samples: 可选，要处理的样本ID列表。如果为None，则自动断点续传处理所有样本。
+                       如果提供了列表，则只处理列表中的样本（仍会跳过已完成的）。
+                       示例: target_samples=['sample1', 'sample2'] 或 target_samples=None
+    """
 
     # 配置参数
     hest_data_dir = "/data/yujk/hovernet2feature/HEST/hest_data"
@@ -1214,6 +1220,29 @@ def main_independent_pca_extraction():
     all_samples = get_all_hest_samples(hest_data_dir)
     print(f"\n发现 {len(all_samples)} 个可用样本: {all_samples}")
 
+    # 如果指定了目标样本列表，验证并过滤
+    if target_samples is not None:
+        if not isinstance(target_samples, (list, tuple)):
+            raise ValueError("target_samples 必须是列表或元组")
+        # 转换为列表并去重
+        target_samples = list(set(target_samples))
+        # 验证样本是否存在
+        invalid_samples = [s for s in target_samples if s not in all_samples]
+        if invalid_samples:
+            print(f"⚠️  警告: 以下样本不存在，将被忽略: {invalid_samples}")
+        # 只保留存在的样本
+        target_samples = [s for s in target_samples if s in all_samples]
+        if not target_samples:
+            print("❌ 错误: 指定的样本列表中没有任何有效样本")
+            return
+        print(f"\n📋 指定处理样本模式: 将处理 {len(target_samples)} 个指定样本")
+        print(f"   指定样本列表: {sorted(target_samples)}")
+        # 使用指定的样本列表作为基础
+        candidate_samples = target_samples
+    else:
+        print(f"\n🔄 自动断点续传模式: 将处理所有未完成的样本")
+        candidate_samples = all_samples
+
     # 加载处理进度
     progress = load_progress(output_dir)
     completed_samples = set(progress.get('completed_samples', []))
@@ -1221,35 +1250,40 @@ def main_independent_pca_extraction():
 
     # 检查文件系统中已完成的样本
     file_completed_samples = set()
-    for sample_id in all_samples:
+    for sample_id in candidate_samples:
         if is_sample_completed(output_dir, sample_id):
             file_completed_samples.add(sample_id)
 
     # 合并进度信息
     all_completed = completed_samples.union(file_completed_samples)
 
-    # 确定需要处理的样本
-    remaining_samples = [s for s in all_samples if s not in all_completed]
+    # 确定需要处理的样本（从候选样本中排除已完成的）
+    remaining_samples = [s for s in candidate_samples if s not in all_completed]
 
-    print(f"\n=== 断点续传状态 ===")
-    print(f"总样本数: {len(all_samples)}")
+    print(f"\n=== 处理状态 ===")
+    if target_samples is not None:
+        print(f"指定样本数: {len(target_samples)}")
+    print(f"候选样本数: {len(candidate_samples)}")
     print(f"已完成样本: {len(all_completed)} - {sorted(list(all_completed))}")
     print(f"失败样本: {len(failed_samples)} - {sorted(list(failed_samples))}")
     print(f"待处理样本: {len(remaining_samples)} - {sorted(remaining_samples)}")
 
     if not remaining_samples:
-        print("✅ 所有样本已处理完成！")
+        if target_samples is not None:
+            print("✅ 所有指定样本已处理完成！")
+        else:
+            print("✅ 所有样本已处理完成！")
         return
 
-    # 询问是否从断点继续
-    if all_completed:
+    # 询问是否从断点继续（仅在自动模式下且有待处理样本时）
+    if target_samples is None and all_completed:
         print(f"\n检测到 {len(all_completed)} 个已完成的样本")
         try:
             resume = input("是否从断点继续处理剩余样本？(y/n, 默认y): ").strip().lower()
             if resume in ['n', 'no']:
                 print("用户选择重新开始处理")
                 # 重置进度
-                remaining_samples = all_samples
+                remaining_samples = candidate_samples
                 progress = {'completed_samples': [], 'failed_samples': []}
                 save_progress(output_dir, progress)
         except KeyboardInterrupt:
@@ -1510,9 +1544,27 @@ if __name__ == "__main__":
     print("特征配置: DINOv3 768维 -> PCA降维至128维")
     print("不包含形态特征，每个样本独立训练PCA")
     print()
-
+    
+    # ============================================================
+    # 使用说明：
+    # 1. 自动断点续传模式（处理所有未完成的样本）：
+    #    main_independent_pca_extraction()
+    #    或
+    #    main_independent_pca_extraction(target_samples=None)
+    #
+    # 2. 指定样本模式（只处理指定的样本）：
+    #    main_independent_pca_extraction(target_samples=['sample1', 'sample2', 'sample3'])
+    #    注意：即使指定了样本列表，已完成的样本仍会被自动跳过
+    # ============================================================
+    
+    # 方式1: 自动断点续传处理所有未完成的样本（默认模式）
+    target_samples = None
+    
+    # 方式2: 指定要处理的样本列表（取消下面的注释并修改样本ID）
+    # target_samples = ['sample1', 'sample2', 'sample3']  # 替换为实际的样本ID
+    
     try:
-        main_independent_pca_extraction()
+        main_independent_pca_extraction(target_samples=target_samples)
     except KeyboardInterrupt:
         print("\n用户取消操作")
     except Exception as e:
