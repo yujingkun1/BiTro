@@ -732,10 +732,17 @@ def main():
 
     # 配置参数
     hest_data_dir = "/data/yujk/hovernet2feature/HEST/hest_data"
-    output_dir = "/data/yujk/hovernet2feature/hest_graphs_normalized_dinov3"
+    output_dir = "/data/yujk/hovernet2feature/hest_graphs_dinov3_cscc"
 
     # 深度特征目录（新增）
-    features_dir = "/data/yujk/hovernet2feature/hest_normalized_dinov3"
+    features_dir = "//data/yujk/hovernet2feature/hest_dinov3_cscc"
+
+    # 是否使用指定样本列表：
+    # - None: 按默认逻辑选择样本（保持原有行为）
+    # - True: 使用下面的 SPECIFIED_SAMPLE_IDS 进行处理
+    USE_SPECIFIED_SAMPLES = True
+    SPECIFIED_SAMPLE_IDS = ['NCBI770', 'NCBI769', 'NCBI768', 'NCBI767', 'NCBI766', 'NCBI765',
+       'NCBI764', 'NCBI763', 'NCBI762', 'NCBI761', 'NCBI760', 'NCBI759']
 
     # 设置使用的样本范围
     USE_ALL_SAMPLES = True  # 使用所有样本
@@ -757,8 +764,20 @@ def main():
     print(f"发现可用样本总数: {len(available_samples)}")
     print(f"样本列表: {available_samples}")
 
-    if USE_ALL_SAMPLES:
-        # 使用所有可用样本
+    # 根据开关选择样本
+    if USE_SPECIFIED_SAMPLES is True:
+        # 使用手动指定的样本列表
+        specified = SPECIFIED_SAMPLE_IDS or []
+        sample_ids = [sid for sid in specified if sid in available_samples]
+        missing = [sid for sid in specified if sid not in available_samples]
+        if missing:
+            print(f"警告: 指定样本中未发现的样本将被忽略: {missing}")
+        print(f"\n选择模式: 使用指定样本列表")
+        if MAX_SAMPLES is not None:
+            sample_ids = sample_ids[:MAX_SAMPLES]
+            print(f"最大样本数限制: {MAX_SAMPLES}")
+    elif USE_ALL_SAMPLES:
+        # 使用所有可用样本（原默认）
         sample_ids = available_samples
         if MAX_SAMPLES is not None:
             sample_ids = sample_ids[:MAX_SAMPLES]

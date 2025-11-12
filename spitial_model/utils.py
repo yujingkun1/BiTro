@@ -46,6 +46,10 @@ def get_fold_samples(fold_idx, all_samples=None):
         4:['SPA130', 'SPA129', 'SPA128', 'SPA127', 'SPA126', 'SPA125'],
         5:['SPA124', 'SPA123', 'SPA122', 'SPA121', 'SPA120', 'SPA119'],
     }
+    fold_splits = {
+        0:['NCBI770', 'NCBI769', 'NCBI768', 'NCBI767', 'NCBI766', 'NCBI765',
+       'NCBI764', 'NCBI763', 'NCBI762', 'NCBI761', 'NCBI760', 'NCBI759'],
+    }
 
     test_samples = fold_splits[fold_idx]
     train_samples = []

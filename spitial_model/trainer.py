@@ -16,7 +16,7 @@ warnings.filterwarnings("ignore")
 
 def train_hest_graph_model(model, train_loader, test_loader, optimizer, scheduler=None,
                            num_epochs=100, device="cuda", patience=10, min_delta=1e-6, fold_idx=None,
-                           cluster_loss_weight: float = 0.1):
+                           cluster_loss_weight: float = 0):
     """
     Training function for HEST graph model with early stopping
     """
@@ -31,7 +31,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
     early_stopping_counter = 0
     best_epoch = 0
     # 最小启用早停的epoch阈值（每个fold在20个epoch之后才启动早停）
-    min_early_stop_epoch = 20
+    min_early_stop_epoch = 12
 
     train_losses = []
     test_losses = []

@@ -48,11 +48,11 @@ def main():
 
     # Configuration parameters
     hest_data_dir = "/data/yujk/hovernet2feature/HEST/hest_data"
-    graph_dir = "/data/yujk/hovernet2feature/hest_graphs_normalized_dinov3"
-    features_dir = "/data/yujk/hovernet2feature/hest_normalized_dinov3"
+    graph_dir = "/data/yujk/hovernet2feature/hest_graphs_dinov3_cscc"
+    features_dir = "/data/yujk/hovernet2feature/hest_dinov3_cscc"
 
     # Specify gene file
-    gene_file = "/data/yujk/hovernet2feature/HEST/tutorials/SA_process/common_genes_misc_tenx_zen_897.txt"
+    gene_file = "/data/yujk/hovernet2feature/target_gene_list.txt"
 
     batch_size = 128
     num_epochs = 50
@@ -254,7 +254,7 @@ def main():
         train_losses, test_losses, epoch_mean_gene_corrs, epoch_overall_corrs = train_hest_graph_model(
             model, train_loader, test_loader, optimizer, scheduler,
             num_epochs=num_epochs, device=device, patience=patience, min_delta=min_delta, fold_idx=fold_idx,
-            cluster_loss_weight=0.1
+            cluster_loss_weight=0
         )
 
         # Load best model for evaluation

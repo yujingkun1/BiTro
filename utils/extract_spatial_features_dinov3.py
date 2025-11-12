@@ -69,7 +69,7 @@ class HESTCellFeatureExtractor:
                  stain_normalize=False,       # 是否进行染色归一化（默认关闭，因WSI已预归一化）
                  stain_method='vahadane',     # 染色归一化方法（目前支持vahadane）
                  stain_target_image=None,     # 目标图像路径（可选）；若为空将从WSI中自选区域拟合
-                 use_normalized_wsi=True,     # 是否优先使用预归一化的WSI目录
+                 use_normalized_wsi=False,     # 是否优先使用预归一化的WSI目录
                  normalized_wsi_subdir="wsis_normalized",  # 预归一化WSI子目录名
                  raw_wsi_subdir="wsis"):    # 原始WSI子目录名
 
@@ -1211,7 +1211,7 @@ def main_independent_pca_extraction(target_samples=None):
 
     # 配置参数
     hest_data_dir = "/data/yujk/hovernet2feature/HEST/hest_data"
-    output_dir = "/data/yujk/hovernet2feature/hest_normalized_dinov3"
+    output_dir = "/data/yujk/hovernet2feature/hest_dinov3_cscc"
 
     # 确保输出目录存在
     os.makedirs(output_dir, exist_ok=True)
@@ -1561,7 +1561,8 @@ if __name__ == "__main__":
     target_samples = None
     
     # 方式2: 指定要处理的样本列表（取消下面的注释并修改样本ID）
-    # target_samples = ['sample1', 'sample2', 'sample3']  # 替换为实际的样本ID
+    target_samples = ['NCBI770', 'NCBI769', 'NCBI768', 'NCBI767', 'NCBI766', 'NCBI765',
+       'NCBI764', 'NCBI763', 'NCBI762', 'NCBI761', 'NCBI760', 'NCBI759']  # 替换为实际的样本ID
     
     try:
         main_independent_pca_extraction(target_samples=target_samples)
