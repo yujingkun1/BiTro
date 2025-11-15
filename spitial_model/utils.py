@@ -46,10 +46,10 @@ def get_fold_samples(fold_idx, all_samples=None):
         4:['SPA130', 'SPA129', 'SPA128', 'SPA127', 'SPA126', 'SPA125'],
         5:['SPA124', 'SPA123', 'SPA122', 'SPA121', 'SPA120', 'SPA119'],
     }
-    fold_splits = {
-        0:['NCBI770', 'NCBI769', 'NCBI768', 'NCBI767', 'NCBI766', 'NCBI765',
-       'NCBI764', 'NCBI763', 'NCBI762', 'NCBI761', 'NCBI760', 'NCBI759'],
-    }
+    # fold_splits = {
+    #     0:['NCBI770', 'NCBI769', 'NCBI768', 'NCBI767', 'NCBI766', 'NCBI765',
+    #    'NCBI764', 'NCBI763', 'NCBI762', 'NCBI761', 'NCBI760', 'NCBI759'],
+    # }
 
     test_samples = fold_splits[fold_idx]
     train_samples = []
@@ -98,6 +98,18 @@ def evaluate_model_metrics(model, data_loader, device):
 
     print("=== Evaluating model ===")
 
+    dataset = getattr(data_loader, 'dataset', None)
+    gene_mean = None
+    gene_std = None
+    apply_normalization = False
+    if dataset is not None and getattr(dataset, 'apply_gene_normalization', False):
+        gene_mean = getattr(dataset, 'gene_mean_np', None)
+        gene_std = getattr(dataset, 'gene_std_np', None)
+        if gene_mean is not None and gene_std is not None:
+            gene_mean = gene_mean.astype(np.float32)
+            gene_std = gene_std.astype(np.float32)
+            apply_normalization = True
+
     with torch.no_grad():
         for batch in tqdm(data_loader, desc="Evaluating"):
             spot_expressions = batch["spot_expressions"].to(device)
@@ -107,8 +119,15 @@ def evaluate_model_metrics(model, data_loader, device):
             predictions = model(spot_graphs)
 
             # Targets are already in log space; keep predictions in the same space
-            all_predictions.append(predictions.cpu().numpy())
-            all_targets.append(spot_expressions.cpu().numpy())
+            predictions_np = predictions.cpu().numpy()
+            targets_np = spot_expressions.cpu().numpy()
+
+            if apply_normalization:
+                predictions_np = predictions_np * gene_std + gene_mean
+                targets_np = targets_np * gene_std + gene_mean
+
+            all_predictions.append(predictions_np)
+            all_targets.append(targets_np)
 
     # Merge all batch results
     all_predictions = np.vstack(all_predictions)  # [n_spots, n_genes]
@@ -221,6 +240,62 @@ def save_evaluation_results(results, predictions, targets, fold_idx, save_dir=".
     np.save(os.path.join(save_dir, f"fold_{fold_idx}_targets.npy"), targets)
 
     print(f"Results saved to {save_dir}")
+
+
+def save_epoch_metrics(train_losses, test_losses, epoch_mean_gene_corrs, epoch_overall_corrs, fold_idx, save_dir="./logs"):
+    """
+    Save per-epoch detailed metrics (losses and Pearson correlations) to JSON file.
+    
+    Args:
+        train_losses: List of training losses per epoch
+        test_losses: List of test losses per epoch
+        epoch_mean_gene_corrs: List of mean gene Pearson correlations per epoch
+        epoch_overall_corrs: List of overall Pearson correlations per epoch
+        fold_idx: Fold index
+        save_dir: Directory to save the metrics file
+    
+    Returns:
+        Path to the saved metrics file
+    """
+    import json
+    
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Convert numpy types to Python native types for JSON serialization
+    def convert_numpy_types(obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return obj
+    
+    # Prepare epoch details
+    epoch_details = []
+    num_epochs_trained = len(train_losses)
+    
+    for epoch_idx in range(num_epochs_trained):
+        epoch_detail = {
+            'epoch': epoch_idx + 1,
+            'train_loss': float(train_losses[epoch_idx]) if epoch_idx < len(train_losses) else None,
+            'test_loss': float(test_losses[epoch_idx]) if epoch_idx < len(test_losses) else None,
+            'mean_gene_correlation': float(epoch_mean_gene_corrs[epoch_idx]) if epoch_idx < len(epoch_mean_gene_corrs) else None,
+            'overall_correlation': float(epoch_overall_corrs[epoch_idx]) if epoch_idx < len(epoch_overall_corrs) else None
+        }
+        epoch_details.append(epoch_detail)
+    
+    # Save per-epoch metrics to JSON file
+    epoch_metrics_file = os.path.join(save_dir, f"fold_{fold_idx}_epoch_metrics.json")
+    with open(epoch_metrics_file, 'w') as f:
+        json.dump({
+            'fold_idx': fold_idx,
+            'num_epochs': num_epochs_trained,
+            'epoch_details': epoch_details
+        }, f, indent=2, default=convert_numpy_types)
+    
+    print(f"✓ Saved per-epoch metrics to {epoch_metrics_file}")
+    return epoch_metrics_file
 
 
 def plot_training_curves(train_losses, test_losses, fold_idx, save_dir="./logs", epoch_mean_gene_corrs=None, epoch_overall_corrs=None):

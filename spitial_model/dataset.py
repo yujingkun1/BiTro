@@ -37,7 +37,10 @@ class HESTSpatialDataset(Dataset):
                  feature_dim=128,
                  mode='train',
                  seed=42,
-                 gene_file=None):
+                 gene_file=None,
+                 apply_gene_normalization=True,
+                 normalization_stats=None,
+                 normalization_eps=1e-6):
 
         self.feature_dim = feature_dim
         self.mode = mode
@@ -48,6 +51,14 @@ class HESTSpatialDataset(Dataset):
         self.features_dir = features_dir
         self.seed = seed
         self.gene_file = gene_file
+        self.apply_gene_normalization = apply_gene_normalization
+        self._normalization_eps = normalization_eps
+        self._provided_normalization_stats = normalization_stats
+        self.gene_mean_tensor = None
+        self.gene_std_tensor = None
+        self.gene_mean_np = None
+        self.gene_std_np = None
+        self.normalization_stats = None
 
         print(f"=== Initializing HEST Dataset (mode: {mode}) ===")
         print(f"Sample count: {len(self.sample_ids)}")
@@ -68,6 +79,9 @@ class HESTSpatialDataset(Dataset):
 
         # 加载图数据
         self.load_graph_data()
+
+        # Setup per-gene normalization if required
+        self.setup_gene_normalization()
 
         print(f"=== Dataset initialization complete ===")
         print(f"Total spots: {len(self.all_spots_data)}")
@@ -376,6 +390,51 @@ class HESTSpatialDataset(Dataset):
             except Exception as e:
                 print(f"  - Error loading features for {sample_id}: {e}")
 
+    def setup_gene_normalization(self):
+        """
+        Prepare per-gene statistics for z-score normalization.
+        """
+        if not self.apply_gene_normalization:
+            print("[normalization] Gene normalization disabled")
+            return
+
+        if self._provided_normalization_stats is not None:
+            print("[normalization] Using provided gene normalization statistics")
+            if not isinstance(self._provided_normalization_stats, dict):
+                raise TypeError(
+                    "normalization_stats must be a dict containing 'mean' and 'std'")
+            mean = self._provided_normalization_stats.get('mean')
+            std = self._provided_normalization_stats.get('std')
+            if mean is None or std is None:
+                raise ValueError(
+                    "normalization_stats must include both 'mean' and 'std'")
+            mean = np.asarray(mean, dtype=np.float32)
+            std = np.asarray(std, dtype=np.float32)
+        else:
+            if self.mode != 'train':
+                raise ValueError(
+                    "Normalization stats must be provided when mode is not 'train'")
+            if not self.all_spots_data:
+                raise RuntimeError(
+                    "Cannot compute normalization stats: dataset contains no spots")
+            print("[normalization] Computing gene-wise mean/std from training data")
+            stacked = np.stack(
+                [spot['gene_expression'] for spot in self.all_spots_data], axis=0)
+            mean = stacked.mean(axis=0).astype(np.float32)
+            std = stacked.std(axis=0).astype(np.float32)
+
+        std[std < self._normalization_eps] = 1.0
+
+        self.gene_mean_np = mean
+        self.gene_std_np = std
+        self.gene_mean_tensor = torch.from_numpy(mean.copy())
+        self.gene_std_tensor = torch.from_numpy(std.copy())
+        self.normalization_stats = {
+            'mean': mean.copy(),
+            'std': std.copy()
+        }
+        print("[normalization] Gene normalization ready")
+
     def __len__(self):
         return len(self.all_spots_data)
 
@@ -384,6 +443,8 @@ class HESTSpatialDataset(Dataset):
 
         # Get gene expression (target)
         spot_expressions = torch.FloatTensor(spot_data['gene_expression'])
+        if self.apply_gene_normalization and self.gene_mean_tensor is not None and self.gene_std_tensor is not None:
+            spot_expressions = (spot_expressions - self.gene_mean_tensor) / self.gene_std_tensor
 
         # Get graph data (lookup from aggregated dict; if missing, try build from raw features)
         graph_data = None
@@ -444,6 +505,17 @@ class HESTSpatialDataset(Dataset):
             'spot_graphs': spot_graph,
             'sample_id': spot_data['sample_id'],
             'spot_id': spot_data['spot_id']
+        }
+
+    def get_normalization_stats(self):
+        """
+        Return copies of gene-wise normalization statistics.
+        """
+        if not self.apply_gene_normalization or self.gene_mean_np is None or self.gene_std_np is None:
+            return None
+        return {
+            'mean': self.gene_mean_np.copy(),
+            'std': self.gene_std_np.copy()
         }
 
 

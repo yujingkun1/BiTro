@@ -25,7 +25,7 @@ from torch.utils.data import DataLoader
 # Import from local spitial_model submodules
 from spitial_model.dataset import HESTSpatialDataset, collate_fn_hest_graph
 from spitial_model.trainer import train_hest_graph_model, setup_optimizer_and_scheduler, setup_model
-from spitial_model.utils import get_fold_samples, evaluate_model_metrics, save_evaluation_results, plot_training_curves, setup_device, plot_fold_gene_correlation_distribution
+from spitial_model.utils import get_fold_samples, evaluate_model_metrics, save_evaluation_results, plot_training_curves, setup_device, plot_fold_gene_correlation_distribution, save_epoch_metrics
 # fmt: on
 
 warnings.filterwarnings("ignore")
@@ -84,6 +84,10 @@ def main():
     cv_mode = os.environ.get("CV_MODE", "kfold")
     start_fold = 0
 
+    # Gene variance normalization control
+    # Set to True to apply per-gene variance normalization, False to disable
+    use_gene_normalization = True  # Change this to False to disable gene variance normalization
+
     print("\n" + "="*70)
     print("=== HEST SPATIAL MODEL WITH TRANSFER LEARNING FROM BULKMODEL ===")
     print("="*70)
@@ -91,6 +95,7 @@ def main():
     print("✓ Using 897 intersection genes")
     print(f"✓ CV mode: {cv_mode}")
     print(f"✓ Gene file: {gene_file}")
+    print(f"✓ Gene variance normalization: {'Enabled' if use_gene_normalization else 'Disabled'}")
     print(f"\n=== Transfer Learning Settings ===")
     print(f"✓ Bulk model path: {bulk_model_path}")
     print(f"✓ Transfer Learning Strategy: {transfer_strategy}")
@@ -197,8 +202,11 @@ def main():
             sample_ids=train_samples,
             feature_dim=feature_dim,
             mode='train',
-            gene_file=gene_file
+            gene_file=gene_file,
+            apply_gene_normalization=use_gene_normalization
         )
+
+        normalization_stats = train_dataset.get_normalization_stats()
 
         test_dataset = HESTSpatialDataset(
             hest_data_dir=hest_data_dir,
@@ -207,7 +215,9 @@ def main():
             sample_ids=test_samples,
             feature_dim=feature_dim,
             mode='test',
-            gene_file=gene_file
+            gene_file=gene_file,
+            apply_gene_normalization=use_gene_normalization,
+            normalization_stats=normalization_stats
         )
 
         # Create data loaders
@@ -263,7 +273,7 @@ def main():
         print(f"Early stopping: patience={patience}, min_delta={min_delta}")
 
         # Train model
-        train_losses, test_losses, epoch_mean_gene_corrs = train_hest_graph_model(
+        train_losses, test_losses, epoch_mean_gene_corrs, epoch_overall_corrs = train_hest_graph_model(
             model, train_loader, test_loader, optimizer, scheduler,
             num_epochs=num_epochs, device=device, patience=patience, min_delta=min_delta, fold_idx=fold_idx
         )
@@ -309,6 +319,9 @@ def main():
         # Plot fold-level gene correlation distribution
         plot_fold_gene_correlation_distribution(
             eval_results.get('gene_correlations'), fold_idx, results_dir)
+
+        # Save per-epoch detailed metrics
+        save_epoch_metrics(train_losses, test_losses, epoch_mean_gene_corrs, epoch_overall_corrs, fold_idx, results_dir)
 
         # Save temporary results
         with open(temp_results_file, 'w') as f:
