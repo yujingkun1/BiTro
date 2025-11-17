@@ -334,6 +334,8 @@ def main():
             f"Overall correlation: {eval_results['overall_correlation']:.6f}")
         print(
             f"Mean gene correlation: {eval_results['mean_gene_correlation']:.6f}")
+        print(
+            f"Std gene correlation: {eval_results.get('std_gene_correlation', 0.0):.6f}")
 
         # Clean up memory
         del model, train_dataset, test_dataset, train_loader, test_loader

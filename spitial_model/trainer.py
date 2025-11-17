@@ -16,7 +16,7 @@ warnings.filterwarnings("ignore")
 
 def train_hest_graph_model(model, train_loader, test_loader, optimizer, scheduler=None,
                            num_epochs=100, device="cuda", patience=10, min_delta=1e-6, fold_idx=None,
-                           cluster_loss_weight: float = 0):
+                           cluster_loss_weight: float = 0, checkpoint_path: str = "best_hest_graph_model.pt"):
     """
     Training function for HEST graph model with early stopping
     """
@@ -208,7 +208,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
             best_test_loss = test_loss
             best_epoch = epoch + 1
             early_stopping_counter = 0
-            torch.save(model.state_dict(), "best_hest_graph_model.pt")
+            torch.save(model.state_dict(), checkpoint_path)
             print(
                 f"  *** Saving best model (Test Loss: {best_test_loss:.6f}, Epoch: {best_epoch}) ***")
         else:

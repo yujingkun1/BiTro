@@ -11,6 +11,7 @@ import os
 import sys
 import json
 import warnings
+import argparse
 
 # Add parent directory to sys.path BEFORE any local imports
 _current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -45,7 +46,18 @@ def convert_numpy_types(obj):
 
 def main():
     """Main training workflow - supports 10-fold and leave-one-out cross validation"""
-
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Train Cell2Gene HEST Spatial Model')
+    parser.add_argument('--output_dir', type=str, 
+                       default=os.environ.get('OUTPUT_DIR', './log_normalized'),
+                       help='Output directory for logs, results, and checkpoints (default: ./log_normalized or from OUTPUT_DIR env var)')
+    args = parser.parse_args()
+    
+    # Set output directory
+    output_dir = args.output_dir
+    checkpoint_dir = os.path.join(output_dir, 'checkpoints')
+    
     # Configuration parameters
     hest_data_dir = "/data/yujk/hovernet2feature/HEST/hest_data"
     graph_dir = "/data/yujk/hovernet2feature/hest_graphs_normalized_dinov3"
@@ -78,7 +90,7 @@ def main():
 
     # Gene variance normalization control
     # Set to True to apply per-gene variance normalization, False to disable
-    use_gene_normalization = True  # Change this to False to disable gene variance normalization
+    use_gene_normalization = False  # Change this to False to disable gene variance normalization
 
     print("=== HEST Spatial Supervised Training ===")
     print("✓ Using direct file reading (no HEST API required)")
@@ -111,14 +123,17 @@ def main():
         pass
 
     # Create results directory
-    os.makedirs("./log_normalized", exist_ok=True)
-    os.makedirs("./checkpoints", exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    print(f"✓ Output directory: {output_dir}")
+    print(f"✓ Checkpoint directory: {checkpoint_dir}")
 
     # Store all fold results
     all_fold_results = {}
 
     # Try to load temporary results
-    temp_results_file = "./log_normalized/temp_fold_results.json"
+    temp_results_file = os.path.join(output_dir, "temp_fold_results.json")
     if os.path.exists(temp_results_file):
         try:
             with open(temp_results_file, 'r') as f:
@@ -260,17 +275,20 @@ def main():
 
         print(f"Loss: MSE + cluster")
 
+        # Define checkpoint path for this fold
+        best_model_path = os.path.join(output_dir, "best_hest_graph_model.pt")
+
         # Train model
         train_losses, test_losses, epoch_mean_gene_corrs, epoch_overall_corrs = train_hest_graph_model(
             model, train_loader, test_loader, optimizer, scheduler,
             num_epochs=num_epochs, device=device, patience=patience, min_delta=min_delta, fold_idx=fold_idx,
-            cluster_loss_weight=0
+            cluster_loss_weight=0, checkpoint_path=best_model_path
         )
 
         # Load best model for evaluation
-        if os.path.exists("best_hest_graph_model.pt"):
+        if os.path.exists(best_model_path):
             model.load_state_dict(torch.load(
-                "best_hest_graph_model.pt", map_location=device))
+                best_model_path, map_location=device))
             print("Loaded best model weights for evaluation")
 
         # Evaluate model performance
@@ -288,9 +306,9 @@ def main():
         )
 
         # Save current fold's best model
-        fold_model_path = f"./checkpoints/best_hest_graph_model_fold_{fold_idx}.pt"
-        if os.path.exists("best_hest_graph_model.pt"):
-            os.rename("best_hest_graph_model.pt", fold_model_path)
+        fold_model_path = os.path.join(checkpoint_dir, f"best_hest_graph_model_fold_{fold_idx}.pt")
+        if os.path.exists(best_model_path):
+            os.rename(best_model_path, fold_model_path)
 
         # Save current fold's complete evaluation metrics
         fold_evaluation_results = {
@@ -314,20 +332,20 @@ def main():
 
         # Save results
         save_evaluation_results(eval_results, predictions,
-                                targets, fold_idx, "./log_normalized")
+                                targets, fold_idx, output_dir)
         plot_training_curves(train_losses, test_losses,
-                             fold_idx, "./log_normalized", epoch_mean_gene_corrs=epoch_mean_gene_corrs, epoch_overall_corrs=epoch_overall_corrs)
+                             fold_idx, output_dir, epoch_mean_gene_corrs=epoch_mean_gene_corrs, epoch_overall_corrs=epoch_overall_corrs)
 
         # Plot fold-level per-gene Pearson distribution
         plot_fold_gene_correlation_distribution(
-            eval_results.get('gene_correlations'), fold_idx, "./log_normalized")
+            eval_results.get('gene_correlations'), fold_idx, output_dir)
 
         # Save per-epoch detailed metrics
-        save_epoch_metrics(train_losses, test_losses, epoch_mean_gene_corrs, epoch_overall_corrs, fold_idx, "./log_normalized")
+        save_epoch_metrics(train_losses, test_losses, epoch_mean_gene_corrs, epoch_overall_corrs, fold_idx, output_dir)
 
         # Persist per-fold best pearsons into a cumulative file
         try:
-            best_metrics_file = "./log_normalized/fold_best_pearsons.json"
+            best_metrics_file = os.path.join(output_dir, "fold_best_pearsons.json")
             if os.path.exists(best_metrics_file):
                 with open(best_metrics_file, 'r') as f:
                     cumulative_best = json.load(f)
@@ -354,6 +372,8 @@ def main():
             f"Overall correlation: {eval_results['overall_correlation']:.6f}")
         print(
             f"Mean gene correlation: {eval_results['mean_gene_correlation']:.6f}")
+        print(
+            f"Std gene correlation: {eval_results.get('std_gene_correlation', 0.0):.6f}")
 
         # Clean up memory
         del model, train_dataset, test_dataset, train_loader, test_loader
@@ -399,21 +419,33 @@ def main():
             f"Average BEST gene correlation: {np.mean(best_gene_list):.6f} ± {np.std(best_gene_list):.6f}")
 
     # Save final results
-    final_results_file = "./log_normalized/final_10fold_results.json" if cv_mode == "kfold" else "./log_normalized/final_loo_results.json"
+    final_results_file = os.path.join(output_dir, "final_10fold_results.json" if cv_mode == "kfold" else "final_loo_results.json")
     with open(final_results_file, 'w') as f:
         json.dump(all_fold_results, f, indent=2, default=convert_numpy_types)
 
     # Save final best pearson summary and plots
-    final_best_file = "./log_normalized/final_10fold_best_pearsons.json" if cv_mode == "kfold" else "./log_normalized/final_loo_best_pearsons.json"
+    final_best_file = os.path.join(output_dir, "final_10fold_best_pearsons.json" if cv_mode == "kfold" else "final_loo_best_pearsons.json")
     try:
         with open(final_best_file, 'w') as f:
             json.dump({
+                # Per-fold data
                 'per_fold_best_overall_pearson': best_overall_list,
                 'per_fold_best_gene_pearson': best_gene_list,
+                'per_fold_final_overall_pearson': overall_correlations,
+                'per_fold_final_gene_pearson': mean_gene_correlations,
+                'per_fold_final_test_loss': final_test_losses,
+                # Best model statistics (from training checkpoints)
                 'average_best_overall_pearson': float(np.mean(best_overall_list)) if best_overall_list else None,
                 'std_best_overall_pearson': float(np.std(best_overall_list)) if best_overall_list else None,
                 'average_best_gene_pearson': float(np.mean(best_gene_list)) if best_gene_list else None,
                 'std_best_gene_pearson': float(np.std(best_gene_list)) if best_gene_list else None,
+                # Final evaluation statistics (based on best model loaded from checkpoint)
+                'average_final_overall_pearson': float(np.mean(overall_correlations)) if overall_correlations else None,
+                'std_final_overall_pearson': float(np.std(overall_correlations)) if overall_correlations else None,
+                'average_final_gene_pearson': float(np.mean(mean_gene_correlations)) if mean_gene_correlations else None,
+                'std_final_gene_pearson': float(np.std(mean_gene_correlations)) if mean_gene_correlations else None,
+                'average_final_test_loss': float(np.mean(final_test_losses)) if final_test_losses else None,
+                'std_final_test_loss': float(np.std(final_test_losses)) if final_test_losses else None,
             }, f, indent=2, default=convert_numpy_types)
     except Exception as e:
         print(f"Warning: could not save final best pearsons summary: {e}")
@@ -424,12 +456,12 @@ def main():
                                  title='Best Overall Pearson Across Folds',
                                  ylabel='Best Overall Pearson',
                                  filename='best_overall_pearson_across_folds.png',
-                                 save_dir='./log_normalized')
+                                 save_dir=output_dir)
         plot_metric_across_folds(best_gene_list,
                                  title='Best Mean Gene Pearson Across Folds',
                                  ylabel='Best Mean Gene Pearson',
                                  filename='best_gene_pearson_across_folds.png',
-                                 save_dir='./log_normalized')
+                                 save_dir=output_dir)
     except Exception as e:
         print(f"Warning: could not generate across-fold Pearson plots: {e}")
 

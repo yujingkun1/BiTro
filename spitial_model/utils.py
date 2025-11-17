@@ -185,6 +185,7 @@ def evaluate_model_metrics(model, data_loader, device):
         'overall_correlation_pval': overall_p,
         'mean_gene_correlation': np.mean(gene_correlations) if gene_correlations else 0,
         'median_gene_correlation': np.median(gene_correlations) if gene_correlations else 0,
+        'std_gene_correlation': np.std(gene_correlations) if gene_correlations and len(gene_correlations) > 1 else 0,
         'mean_spot_correlation': np.mean(spot_correlations) if spot_correlations else 0,
         'median_spot_correlation': np.median(spot_correlations) if spot_correlations else 0,
         'mean_gene_mse': np.mean(gene_mses),
@@ -202,6 +203,7 @@ def evaluate_model_metrics(model, data_loader, device):
         f"Overall Correlation: {results['overall_correlation']:.6f} (p={results['overall_correlation_pval']:.2e})")
     print(f"Mean Gene Correlation: {results['mean_gene_correlation']:.6f}")
     print(f"Median Gene Correlation: {results['median_gene_correlation']:.6f}")
+    print(f"Std Gene Correlation: {results['std_gene_correlation']:.6f}")
     print(f"Mean Spot Correlation: {results['mean_spot_correlation']:.6f}")
     print(f"Median Spot Correlation: {results['median_spot_correlation']:.6f}")
     print(f"Mean Gene MSE: {results['mean_gene_mse']:.6f}")
@@ -229,6 +231,8 @@ def save_evaluation_results(results, predictions, targets, fold_idx, save_dir=".
             f"Mean Gene Correlation: {results['mean_gene_correlation']:.6f}\n")
         f.write(
             f"Median Gene Correlation: {results['median_gene_correlation']:.6f}\n")
+        f.write(
+            f"Std Gene Correlation: {results['std_gene_correlation']:.6f}\n")
         f.write(
             f"Mean Spot Correlation: {results['mean_spot_correlation']:.6f}\n")
         f.write(
