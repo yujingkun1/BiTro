@@ -68,7 +68,7 @@ def main():
 
     batch_size = 128
     num_epochs = 50
-    learning_rate = 1e-5
+    learning_rate = 1e-4
     weight_decay = 1e-5   # 恢复正常weight_decay
     feature_dim = 128
 
@@ -281,7 +281,7 @@ def main():
         # Train model
         train_losses, test_losses, epoch_mean_gene_corrs, epoch_overall_corrs = train_hest_graph_model(
             model, train_loader, test_loader, optimizer, scheduler,
-            num_epochs=num_epochs, device=device, patience=patience, min_delta=min_delta, fold_idx=fold_idx,
+            num_epochs=num_epochs, device="cuda:1", patience=patience, min_delta=min_delta, fold_idx=fold_idx,
             cluster_loss_weight=0, checkpoint_path=best_model_path
         )
 
