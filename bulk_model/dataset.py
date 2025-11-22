@@ -7,13 +7,14 @@ from torch.utils.data import Dataset
 
 
 class BulkStaticGraphDataset372(Dataset):
-    def __init__(self, graph_data_dir, split='train', selected_genes=None, max_samples=None, fold_config=None):
+    def __init__(self, graph_data_dir, split='train', selected_genes=None, max_samples=None, fold_config=None, tpm_csv_file=None):
         super().__init__()
         self.graph_data_dir = graph_data_dir
         self.split = split
         self.selected_genes = selected_genes if selected_genes else []
         self.max_samples = max_samples
         self.fold_config = fold_config
+        self.tpm_csv_file = tpm_csv_file
 
         self.load_graph_data()
 
@@ -106,9 +107,22 @@ class BulkStaticGraphDataset372(Dataset):
             self.patient_ids = list(self.intra_patch_graphs.keys())
 
         print("使用筛选后的897基因TPM数据...")
-        tpm_csv_file = "/root/autodl-tmp/tpm-TCGA-COAD-897-million.csv"
+        if self.tpm_csv_file is None:
+            raise ValueError("tpm_csv_file参数未提供，请在创建dataset时指定TPM文件路径")
         import pandas as pd
-        tpm_df = pd.read_csv(tpm_csv_file, index_col=0)
+        tpm_df = pd.read_csv(self.tpm_csv_file, index_col=0)
+
+        # 🔒 关键修复：只加载当前split对应的患者TPM数据，防止数据泄露
+        # 先确定当前split包含哪些患者ID
+        current_split_patient_ids = set()
+        if self.slide_to_patient_mapping:
+            # 按切片组织：从slide_to_patient_mapping获取患者ID
+            current_split_patient_ids = set(self.slide_to_patient_mapping.values())
+        else:
+            # 按患者组织：直接使用patient_ids
+            current_split_patient_ids = set(self.patient_ids) if hasattr(self, 'patient_ids') else set()
+        
+        print(f"🔒 数据泄露防护：当前{self.split}集包含 {len(current_split_patient_ids)} 个患者")
 
         self.expressions_data = {}
         self.patient_id_mapping = {}
@@ -116,13 +130,17 @@ class BulkStaticGraphDataset372(Dataset):
             parts = full_patient_id.split('-')
             if len(parts) >= 4:
                 truncated_id = '-'.join(parts[:4]) + '-01'
-                self.expressions_data[truncated_id] = tpm_df[full_patient_id].values.astype(np.float32)
-                self.patient_id_mapping[truncated_id] = full_patient_id
+                # 只加载当前split的患者数据
+                if truncated_id in current_split_patient_ids:
+                    self.expressions_data[truncated_id] = tpm_df[full_patient_id].values.astype(np.float32)
+                    self.patient_id_mapping[truncated_id] = full_patient_id
             else:
-                self.expressions_data[full_patient_id] = tpm_df[full_patient_id].values.astype(np.float32)
-                self.patient_id_mapping[full_patient_id] = full_patient_id
+                # 只加载当前split的患者数据
+                if full_patient_id in current_split_patient_ids:
+                    self.expressions_data[full_patient_id] = tpm_df[full_patient_id].values.astype(np.float32)
+                    self.patient_id_mapping[full_patient_id] = full_patient_id
 
-        print(f"✅ 加载了 {len(self.expressions_data)} 个患者的897基因表达数据")
+        print(f"✅ 加载了 {len(self.expressions_data)} 个患者的897基因表达数据（仅当前{self.split}集）")
 
         sample_patient = list(self.expressions_data.keys())[0]
         sample_sum = np.sum(self.expressions_data[sample_patient])
@@ -236,7 +254,29 @@ def collate_fn_bulk_372(batch):
     slide_ids = [item['slide_id'] for item in batch]
     patient_ids = [item['patient_id'] for item in batch]
     spot_graphs_list = [item['spot_graphs'] for item in batch]
-    expressions = torch.stack([item['expression'] for item in batch])
+    
+    # 确保所有expression张量大小一致
+    expression_list = [item['expression'] for item in batch]
+    if len(expression_list) > 0:
+        # 获取目标大小（使用第一个非空张量的大小）
+        target_size = expression_list[0].shape[0] if len(expression_list[0].shape) > 0 else expression_list[0].numel()
+        # 确保所有张量大小一致
+        normalized_expressions = []
+        for expr in expression_list:
+            if expr.shape[0] != target_size:
+                # 如果大小不一致，进行填充或截断
+                if expr.shape[0] < target_size:
+                    # 填充零
+                    padding = torch.zeros(target_size - expr.shape[0], dtype=expr.dtype, device=expr.device)
+                    expr = torch.cat([expr, padding])
+                else:
+                    # 截断
+                    expr = expr[:target_size]
+            normalized_expressions.append(expr)
+        expressions = torch.stack(normalized_expressions)
+    else:
+        expressions = torch.empty((0,))
+    
     all_cell_features_list = [item['all_cell_features'] for item in batch]
     all_cell_positions_list = [item['all_cell_positions'] for item in batch]
     cluster_labels_list = [item['cluster_labels'] for item in batch]
@@ -254,23 +294,17 @@ def collate_fn_bulk_372(batch):
         'has_graphs_list': has_graphs_list,
         'cell_mappings_list': cell_mappings_list
     }
-
-import os
-import json
-import pickle
-import numpy as np
-import torch
-from torch.utils.data import Dataset
 
 
 class BulkStaticGraphDataset372(Dataset):
-    def __init__(self, graph_data_dir, split='train', selected_genes=None, max_samples=None, fold_config=None):
+    def __init__(self, graph_data_dir, split='train', selected_genes=None, max_samples=None, fold_config=None, tpm_csv_file=None):
         super().__init__()
         self.graph_data_dir = graph_data_dir
         self.split = split
         self.selected_genes = selected_genes if selected_genes else []
         self.max_samples = max_samples
         self.fold_config = fold_config
+        self.tpm_csv_file = tpm_csv_file
         self.load_graph_data()
         if self.fold_config:
             self.apply_fold_filter()
@@ -357,21 +391,39 @@ class BulkStaticGraphDataset372(Dataset):
             self.patient_ids = list(self.intra_patch_graphs.keys())
 
         print("使用筛选后的897基因TPM数据...")
+        if self.tpm_csv_file is None:
+            raise ValueError("tpm_csv_file参数未提供，请在创建dataset时指定TPM文件路径")
         import pandas as pd
-        tpm_csv_file = "/root/autodl-tmp/tpm-TCGA-COAD-897-million.csv"
-        tpm_df = pd.read_csv(tpm_csv_file, index_col=0)
+        tpm_df = pd.read_csv(self.tpm_csv_file, index_col=0)
+        
+        # 🔒 关键修复：只加载当前split对应的患者TPM数据，防止数据泄露
+        # 先确定当前split包含哪些患者ID
+        current_split_patient_ids = set()
+        if self.slide_to_patient_mapping:
+            # 按切片组织：从slide_to_patient_mapping获取患者ID
+            current_split_patient_ids = set(self.slide_to_patient_mapping.values())
+        else:
+            # 按患者组织：直接使用patient_ids
+            current_split_patient_ids = set(self.patient_ids) if hasattr(self, 'patient_ids') else set()
+        
+        print(f"🔒 数据泄露防护：当前{self.split}集包含 {len(current_split_patient_ids)} 个患者")
+
         self.expressions_data = {}
         self.patient_id_mapping = {}
         for full_patient_id in tpm_df.columns:
             parts = full_patient_id.split('-')
             if len(parts) >= 4:
                 truncated_id = '-'.join(parts[:4]) + '-01'
-                self.expressions_data[truncated_id] = tpm_df[full_patient_id].values.astype(np.float32)
-                self.patient_id_mapping[truncated_id] = full_patient_id
+                # 只加载当前split的患者数据
+                if truncated_id in current_split_patient_ids:
+                    self.expressions_data[truncated_id] = tpm_df[full_patient_id].values.astype(np.float32)
+                    self.patient_id_mapping[truncated_id] = full_patient_id
             else:
-                self.expressions_data[full_patient_id] = tpm_df[full_patient_id].values.astype(np.float32)
-                self.patient_id_mapping[full_patient_id] = full_patient_id
-        print(f"✅ 加载了 {len(self.expressions_data)} 个患者的897基因表达数据")
+                # 只加载当前split的患者数据
+                if full_patient_id in current_split_patient_ids:
+                    self.expressions_data[full_patient_id] = tpm_df[full_patient_id].values.astype(np.float32)
+                    self.patient_id_mapping[full_patient_id] = full_patient_id
+        print(f"✅ 加载了 {len(self.expressions_data)} 个患者的897基因表达数据（仅当前{self.split}集）")
         sample_patient = list(self.expressions_data.keys())[0]
         sample_sum = np.sum(self.expressions_data[sample_patient])
         print(f"验证 - 样本患者表达值总和: {sample_sum:.2f}")
@@ -471,28 +523,4 @@ class BulkStaticGraphDataset372(Dataset):
             'has_graphs': has_graphs,
             'cell_mapping': cell_mapping
         }
-
-
-def collate_fn_bulk_372(batch):
-    slide_ids = [item['slide_id'] for item in batch]
-    patient_ids = [item['patient_id'] for item in batch]
-    spot_graphs_list = [item['spot_graphs'] for item in batch]
-    expressions = torch.stack([item['expression'] for item in batch])
-    all_cell_features_list = [item['all_cell_features'] for item in batch]
-    all_cell_positions_list = [item['all_cell_positions'] for item in batch]
-    cluster_labels_list = [item['cluster_labels'] for item in batch]
-    has_graphs_list = [item['has_graphs'] for item in batch]
-    cell_mappings_list = [item['cell_mapping'] for item in batch]
-    return {
-        'slide_ids': slide_ids,
-        'patient_ids': patient_ids,
-        'spot_graphs_list': spot_graphs_list,
-        'expressions': expressions,
-        'all_cell_features_list': all_cell_features_list,
-        'all_cell_positions_list': all_cell_positions_list,
-        'cluster_labels_list': cluster_labels_list,
-        'has_graphs_list': has_graphs_list,
-        'cell_mappings_list': cell_mappings_list
-    }
-
 
