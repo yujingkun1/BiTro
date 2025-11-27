@@ -313,35 +313,71 @@ def setup_model(feature_dim, num_genes, device, use_transfer_learning=False, bul
             loaded_keys = []
             skipped_keys = []
             mismatched_keys = []
+            
+            # Expected differences between bulk and spatial models:
+            # - Bulk has pos_encoding, Spatial has x_embed/y_embed (spatial-specific)
+            # - Spatial has gene_queries and gene_readout (spatial-specific)
+            # - Both should share: gnn, feature_projection, transformer, output_projection (if compatible)
+            
+            # Categories for better logging
+            lora_keys_loaded = []
+            base_keys_loaded = []
 
             for key, value in bulk_state_dict.items():
                 if key in model_state_dict:
                     if model_state_dict[key].shape == value.shape:
                         model_state_dict[key] = value
                         loaded_keys.append(key)
+                        # Categorize keys
+                        if 'lora' in key.lower():
+                            lora_keys_loaded.append(key)
+                        else:
+                            base_keys_loaded.append(key)
                     else:
                         mismatched_keys.append(
                             (key, model_state_dict[key].shape, value.shape))
                 else:
-                    skipped_keys.append(key)
+                    # Skip keys that are bulk-specific (e.g., pos_encoding) or spatial-specific
+                    if 'pos_encoding' in key.lower():
+                        # This is expected - bulk uses pos_encoding, spatial uses x_embed/y_embed
+                        pass
+                    else:
+                        skipped_keys.append(key)
 
             model.load_state_dict(model_state_dict, strict=False)
 
-            print(
-                f"\n✓ Successfully loaded {len(loaded_keys)} weight layers from bulkmodel")
+            print(f"\n✓ Successfully loaded {len(loaded_keys)} weight layers from bulkmodel")
+            if base_keys_loaded:
+                print(f"  - Base weights: {len(base_keys_loaded)} layers")
+                print(f"    Examples: {', '.join(base_keys_loaded[:3])}")
+            if lora_keys_loaded:
+                print(f"  - LoRA weights: {len(lora_keys_loaded)} layers")
+                print(f"    Examples: {', '.join(lora_keys_loaded[:3])}")
+            
             if mismatched_keys:
-                print(
-                    f"⚠ Skipped {len(mismatched_keys)} layers due to shape mismatch:")
+                print(f"\n⚠ Skipped {len(mismatched_keys)} layers due to shape mismatch:")
                 # Show first 5
                 for key, model_shape, bulk_shape in mismatched_keys[:5]:
-                    print(
-                        f"    {key}: model {model_shape} vs bulk {bulk_shape}")
+                    print(f"    {key}: model {model_shape} vs bulk {bulk_shape}")
                 if len(mismatched_keys) > 5:
                     print(f"    ... and {len(mismatched_keys) - 5} more")
 
             if skipped_keys:
-                print(
-                    f"⚠ Skipped {len(skipped_keys)} layers not present in spatial model")
+                # Filter out expected differences
+                unexpected_skips = [k for k in skipped_keys if 'pos_encoding' not in k.lower()]
+                expected_skips = [k for k in skipped_keys if 'pos_encoding' in k.lower()]
+                
+                if expected_skips:
+                    print(f"\n✓ Expected differences (bulk-specific layers):")
+                    for key in expected_skips[:3]:
+                        print(f"    {key} (bulk uses pos_encoding, spatial uses x_embed/y_embed)")
+                
+                if unexpected_skips:
+                    print(f"\n⚠ Skipped {len(unexpected_skips)} layers not present in spatial model:")
+                    for key in unexpected_skips[:5]:
+                        print(f"    {key}")
+                    if len(unexpected_skips) > 5:
+                        print(f"    ... and {len(unexpected_skips) - 5} more")
 
             # Freeze backbone if requested
             if freeze_backbone:
@@ -349,26 +385,40 @@ def setup_model(feature_dim, num_genes, device, use_transfer_learning=False, bul
                 frozen_params = 0
                 trainable_params = 0
 
-                # Freeze GNN and feature projection layers
+                # Freeze GNN and feature projection layers (including LoRA adapters)
                 if hasattr(model, 'gnn'):
-                    for param in model.gnn.parameters():
+                    for name, param in model.gnn.named_parameters():
                         param.requires_grad = False
                         frozen_params += param.numel()
 
                 if hasattr(model, 'feature_projection'):
-                    for param in model.feature_projection.parameters():
+                    # Handle both base Linear and LoRALinear
+                    for name, param in model.feature_projection.named_parameters():
                         param.requires_grad = False
                         frozen_params += param.numel()
 
-                # Keep transformer and output projection trainable
+                # Keep transformer, output projection, and spatial-specific layers trainable
                 for param in model.transformer.parameters():
                     trainable_params += param.numel()
 
                 for param in model.output_projection.parameters():
                     trainable_params += param.numel()
+                
+                # Spatial-specific layers (gene_queries, gene_readout, x_embed, y_embed)
+                if hasattr(model, 'gene_queries'):
+                    trainable_params += model.gene_queries.numel()
+                if hasattr(model, 'gene_readout'):
+                    for param in model.gene_readout.parameters():
+                        trainable_params += param.numel()
+                if hasattr(model, 'x_embed'):
+                    for param in model.x_embed.parameters():
+                        trainable_params += param.numel()
+                if hasattr(model, 'y_embed'):
+                    for param in model.y_embed.parameters():
+                        trainable_params += param.numel()
 
-                print(f"✓ Frozen {frozen_params:,} parameters")
-                print(f"✓ Trainable {trainable_params:,} parameters")
+                print(f"✓ Frozen {frozen_params:,} parameters (GNN + Feature Projection)")
+                print(f"✓ Trainable {trainable_params:,} parameters (Transformer + Output + Spatial layers)")
 
         except Exception as e:
             print(f"❌ Error loading bulkmodel weights: {e}")

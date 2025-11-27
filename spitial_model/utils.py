@@ -26,26 +26,31 @@ def get_fold_samples(fold_idx, all_samples=None):
     """
     Get train/test splits for 10-fold cross validation (fixed splits matching original implementation)
     """
+    # fold_splits = {
+    #     0: ['TENX152', 'MISC73', 'MISC72', 'MISC71', 'MISC70'],
+    #     1: ['MISC69', 'MISC68', 'MISC67', 'MISC66', 'MISC65'],
+    #     2: ['MISC64', 'MISC63', 'MISC62', 'MISC58', 'MISC57'],
+    #     3: ['MISC56', 'MISC51', 'MISC50', 'MISC49', 'MISC48'],
+    #     4: ['MISC47', 'MISC46', 'MISC45', 'MISC44', 'MISC43'],
+    #     5: ['MISC42', 'MISC41', 'MISC40', 'MISC39', 'MISC38'],
+    #     6: ['MISC37', 'MISC36', 'MISC35', 'MISC34', 'MISC33'],
+    #     7: ['TENX92', 'TENX91', 'TENX90', 'TENX89', 'TENX49'],
+    #     8: ['TENX29', 'ZEN47', 'ZEN46', 'ZEN45', 'ZEN44'],
+    #     9: ['ZEN43', 'ZEN42', 'ZEN39', 'ZEN38']
+    # }
     fold_splits = {
-        0: ['TENX152', 'MISC73', 'MISC72', 'MISC71', 'MISC70'],
-        1: ['MISC69', 'MISC68', 'MISC67', 'MISC66', 'MISC65'],
-        2: ['MISC64', 'MISC63', 'MISC62', 'MISC58', 'MISC57'],
-        3: ['MISC56', 'MISC51', 'MISC50', 'MISC49', 'MISC48'],
-        4: ['MISC47', 'MISC46', 'MISC45', 'MISC44', 'MISC43'],
-        5: ['MISC42', 'MISC41', 'MISC40', 'MISC39', 'MISC38'],
-        6: ['MISC37', 'MISC36', 'MISC35', 'MISC34', 'MISC33'],
-        7: ['TENX92', 'TENX91', 'TENX90', 'TENX89', 'TENX49'],
-        8: ['TENX29', 'ZEN47', 'ZEN46', 'ZEN45', 'ZEN44'],
-        9: ['ZEN43', 'ZEN42', 'ZEN39', 'ZEN38']
+        0: ['TENX152','TENX92', 'TENX91', 'TENX90', 'TENX89', 'TENX49'],
+        1: ['TENX29', 'ZEN47', 'ZEN46', 'ZEN45', 'ZEN44'],
+        2: ['ZEN43', 'ZEN42', 'ZEN39', 'ZEN38']
     }
-    fold_splits = {
-        0:['SPA154', 'SPA153', 'SPA152', 'SPA151', 'SPA150', 'SPA149'],
-        1:['SPA148', 'SPA147', 'SPA146', 'SPA145', 'SPA144', 'SPA143'],
-        2:['SPA142', 'SPA141', 'SPA140', 'SPA139', 'SPA138', 'SPA137'],
-        3:['SPA136', 'SPA135', 'SPA134', 'SPA133', 'SPA132', 'SPA131'],
-        4:['SPA130', 'SPA129', 'SPA128', 'SPA127', 'SPA126', 'SPA125'],
-        5:['SPA124', 'SPA123', 'SPA122', 'SPA121', 'SPA120', 'SPA119'],
-    }
+    # fold_splits = {
+    #     0:['SPA154', 'SPA153', 'SPA152', 'SPA151', 'SPA150', 'SPA149'],
+    #     1:['SPA148', 'SPA147', 'SPA146', 'SPA145', 'SPA144', 'SPA143'],
+    #     2:['SPA142', 'SPA141', 'SPA140', 'SPA139', 'SPA138', 'SPA137'],
+    #     3:['SPA136', 'SPA135', 'SPA134', 'SPA133', 'SPA132', 'SPA131'],
+    #     4:['SPA130', 'SPA129', 'SPA128', 'SPA127', 'SPA126', 'SPA125'],
+    #     5:['SPA124', 'SPA123', 'SPA122', 'SPA121', 'SPA120', 'SPA119'],
+    # }
     # fold_splits = {
     #     0:['NCBI770', 'NCBI769', 'NCBI768', 'NCBI767', 'NCBI766', 'NCBI765',
     #    'NCBI764', 'NCBI763', 'NCBI762', 'NCBI761', 'NCBI760', 'NCBI759'],

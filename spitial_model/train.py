@@ -64,11 +64,11 @@ def main():
     features_dir = "/data/yujk/hovernet2feature/hest_normalized_dinov3"
 
     # Specify gene file
-    gene_file = "/data/yujk/hovernet2feature/HisToGene/data/her_hvg_cut_1000.txt"
+    gene_file = "/data/yujk/hovernet2feature/HEST/tutorials/SA_process/common_genes_misc_tenx_zen_897.txt"
 
     batch_size = 128
-    num_epochs = 50
-    learning_rate = 1e-4
+    num_epochs = 60
+    learning_rate = 1e-5
     weight_decay = 1e-5   # 恢复正常weight_decay
     feature_dim = 128
 
