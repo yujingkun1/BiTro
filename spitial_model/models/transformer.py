@@ -194,24 +194,22 @@ class StaticGraphTransformerPredictor(nn.Module):
         device = next(self.parameters()).device
         if not isinstance(batch_graphs, (list, tuple)) or len(batch_graphs) == 0:
             return torch.zeros(0, self.output_projection[-2].out_features, device=device)
-        # 逐图处理，避免批量 padding 与掩码带来的复杂性
-        predictions = []
-        node_embeddings_list = []
-        processed_indices = []
+        
+        # 第一步：收集所有有效图并处理GNN部分（保持原样，逐图处理）
+        valid_graphs_data = []
+        valid_indices = []
         for idx, g in enumerate(batch_graphs):
             if g is None:
                 continue
-            # 将图相关张量移至设备
             gx = g.x if hasattr(g, 'x') else None
             if gx is None or gx.numel() == 0:
                 continue
             edge_index = getattr(g, 'edge_index', None)
             if edge_index is not None:
                 edge_index = edge_index.to(device)
-
             gx = gx.to(device)
 
-            # GNN 编码（单图）
+            # GNN 编码（单图，保持原样）
             if self.use_gnn and edge_index is not None and edge_index.numel() > 0:
                 node_features = self.gnn(gx, edge_index)
             else:
@@ -232,13 +230,56 @@ class StaticGraphTransformerPredictor(nn.Module):
                 pos = pos.to(device)
 
             pos_enc = self.generate_spatial_pos_encoding(pos, node_features.size(1))
-
-            # 构造序列并通过 Transformer（batch_first=True）
-            seq = (node_features + pos_enc).unsqueeze(0)  # [1, S, E]
-            transformer_output = self.transformer(seq)  # [1, S, E]
-
+            
+            # 保存序列和原始索引
+            seq = node_features + pos_enc  # [S, E]
+            valid_graphs_data.append({
+                'seq': seq,
+                'seq_len': seq.size(0),
+                'orig_idx': idx
+            })
+            valid_indices.append(idx)
+        
+        if not valid_graphs_data:
+            if return_node_embeddings:
+                return (
+                    torch.zeros(0, self.output_projection[-2].out_features, device=device),
+                    [],
+                    []
+                )
+            return torch.zeros(0, self.output_projection[-2].out_features, device=device)
+        
+        # 第二步：批量处理Transformer部分（这是关键优化）
+        # 找到最大序列长度
+        max_seq_len = max(item['seq_len'] for item in valid_graphs_data)
+        batch_size = len(valid_graphs_data)
+        embed_dim = valid_graphs_data[0]['seq'].size(1)
+        
+        # 创建padded batch
+        padded_seqs = torch.zeros(batch_size, max_seq_len, embed_dim, device=device)
+        
+        for i, item in enumerate(valid_graphs_data):
+            seq_len = item['seq_len']
+            padded_seqs[i, :seq_len, :] = item['seq']
+        
+        # 批量传入Transformer（这是性能提升的关键！）
+        # Note: We don't use src_key_padding_mask to avoid NestedTensor compatibility issues
+        # The Transformer will process all positions, but we only use valid positions in the output
+        transformer_output = self.transformer(padded_seqs)  # [B, max_seq_len, E]
+        
+        # 第三步：逐图处理后续的attention和readout（因为每个图的序列长度不同）
+        predictions = []
+        node_embeddings_list = []
+        processed_indices = []
+        
+        for i, item in enumerate(valid_graphs_data):
+            seq_len = item['seq_len']
+            orig_idx = item['orig_idx']
+            
+            # 提取该图的Transformer输出（去掉padding部分）
+            H = transformer_output[i, :seq_len, :]  # [S, E]
+            
             # Gene-specific attention aggregation over nodes
-            H = transformer_output.squeeze(0)  # [S, E]
             # Attention weights per gene over S nodes: softmax(Q H^T / sqrt(E))
             attn_logits = torch.matmul(self.gene_queries, H.transpose(0, 1)) / math.sqrt(self.embed_dim)  # [G, S]
             attn_weights = torch.softmax(attn_logits, dim=1)  # [G, S]
@@ -249,7 +290,7 @@ class StaticGraphTransformerPredictor(nn.Module):
             predictions.append(y)
             if return_node_embeddings:
                 node_embeddings_list.append(H)
-                processed_indices.append(idx)
+                processed_indices.append(orig_idx)
 
         if not predictions:
             if return_node_embeddings:

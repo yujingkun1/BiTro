@@ -169,7 +169,32 @@ class LoRAMultiheadSelfAttention(nn.Module):
                 average_attn_weights: bool = True,
                 is_causal: bool = False):
         # Assume batch_first=True
-        B, S, E = query.shape
+        # Handle NestedTensor (PyTorch Transformer may convert input to NestedTensor when src_key_padding_mask is provided)
+        # NestedTensor doesn't support .shape, so we need to convert to regular tensor
+        try:
+            B, S, E = query.shape
+        except (RuntimeError, AttributeError):
+            # If query is NestedTensor, convert to regular tensor
+            # Use torch.nested.to_padded_tensor if available, or the instance method
+            try:
+                # Try using torch.nested.to_padded_tensor (PyTorch 2.0+)
+                if hasattr(torch.nested, 'to_padded_tensor'):
+                    query = torch.nested.to_padded_tensor(query, 0.0)
+                    key = torch.nested.to_padded_tensor(key, 0.0)
+                    value = torch.nested.to_padded_tensor(value, 0.0)
+                elif hasattr(query, 'to_padded_tensor'):
+                    # Use instance method if available
+                    query = query.to_padded_tensor(0.0)
+                    key = key.to_padded_tensor(0.0) if hasattr(key, 'to_padded_tensor') else key
+                    value = value.to_padded_tensor(0.0) if hasattr(value, 'to_padded_tensor') else value
+                else:
+                    # Fallback: try to get size and manually convert
+                    # This shouldn't happen in practice, but handle it gracefully
+                    raise RuntimeError("Cannot convert NestedTensor: to_padded_tensor not available")
+                B, S, E = query.shape
+            except Exception as conv_e:
+                raise RuntimeError(f"Failed to convert NestedTensor to regular tensor: {conv_e}")
+        
         assert E == self.embed_dim, "Input embedding dim mismatch"
 
         # Projections with LoRA on Q and V
@@ -207,6 +232,9 @@ class LoRAMultiheadSelfAttention(nn.Module):
                 attn_scores = attn_scores.masked_fill(~causal_mask.view(1, 1, S, S), float('-inf'))
 
             if key_padding_mask is not None:
+                # Ensure mask is boolean type (PyTorch Transformer may convert it to float)
+                if key_padding_mask.dtype != torch.bool:
+                    key_padding_mask = key_padding_mask.bool()
                 mask = key_padding_mask.view(B, 1, 1, S)
                 attn_scores = attn_scores.masked_fill(mask, float('-inf'))
 
