@@ -309,7 +309,7 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
             best_test_loss = test_loss
             best_epoch = epoch + 1
             early_stopping_counter = 0
-            torch.save(model.state_dict(), "best_lora_model.pt")
+            torch.save(model.state_dict(), "best_lora_model_fix.pt")
             print(f"  *** 保存最佳模型 ***")
         else:
             early_stopping_counter += 1
@@ -330,7 +330,7 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
     plt.title('Optimized Bulk Static Training Loss (372 Genes, Multi-Graph Batch)')
     plt.legend()
     plt.grid(True)
-    plt.savefig('bulk_lora_loss.png')
+    plt.savefig('bulk_lora_loss_fix.png')
     plt.close()
 
     return train_losses, test_losses
