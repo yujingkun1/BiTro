@@ -154,6 +154,24 @@ def js_divergence(pred: np.ndarray, target: np.ndarray, eps: float = 1e-12) -> f
     return 0.5 * (_safe_kl(p, m) + _safe_kl(q, m))
 
 
+def average_pairwise_pearson(vectors: List[np.ndarray] | np.ndarray) -> float:
+    """计算样本之间的平均 Pearson（仅对行之间做 pairwise）"""
+    if isinstance(vectors, list):
+        if not vectors:
+            return float("nan")
+        vectors = np.stack(vectors, axis=0)
+    if vectors.shape[0] < 2:
+        return float("nan")
+    with np.errstate(invalid="ignore"):
+        corr_matrix = np.corrcoef(vectors)
+    upper_idx = np.triu_indices_from(corr_matrix, k=1)
+    upper_values = corr_matrix[upper_idx]
+    valid_values = upper_values[np.isfinite(upper_values)]
+    if valid_values.size == 0:
+        return float("nan")
+    return float(np.mean(valid_values))
+
+
 def prepare_device(device_arg: str | None) -> torch.device:
     if device_arg:
         return torch.device(device_arg)
@@ -281,6 +299,8 @@ def evaluate():
     model.eval()
 
     per_sample_metrics: List[Dict] = []
+    all_target_vectors: List[np.ndarray] = []
+    all_prediction_vectors: List[np.ndarray] = []
 
     print(f"[评估] 开始评估 {args.split} 集...")
     with torch.no_grad():
@@ -351,6 +371,8 @@ def evaluate():
                         "js_divergence": js_val,
                     }
                 )
+                all_prediction_vectors.append(pred_np)
+                all_target_vectors.append(target_np)
 
             if (batch_idx + 1) % 10 == 0:
                 print(f"  已处理 {batch_idx + 1} 个批次...")
@@ -368,6 +390,17 @@ def evaluate():
 
     print("\n" + "="*60)
     print("=== 评估结果汇总 ===")
+    print("="*60)
+    target_target_avg = average_pairwise_pearson(all_target_vectors)
+    pred_pred_avg = average_pairwise_pearson(all_prediction_vectors)
+    if math.isfinite(target_target_avg):
+        print(f"原始样本之间平均 Pearson: {target_target_avg:.4f}")
+    else:
+        print("原始样本之间平均 Pearson: 无法计算（样本不足或存在零方差）")
+    if math.isfinite(pred_pred_avg):
+        print(f"预测样本之间平均 Pearson: {pred_pred_avg:.4f}")
+    else:
+        print("预测样本之间平均 Pearson: 无法计算（样本不足或存在零方差）")
     print("="*60)
     print(f"评估样本数: {len(per_sample_metrics)}")
     if pearson_values.size > 0:

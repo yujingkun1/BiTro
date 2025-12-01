@@ -166,20 +166,70 @@ class BulkStaticGraphDataset372(Dataset):
 
         self.expressions_data = {}
         self.patient_id_mapping = {}
+        
+        # 改进的患者ID匹配：支持多种格式
         for full_patient_id in tpm_df.columns:
-            parts = full_patient_id.split('-')
-            if len(parts) >= 4:
-                truncated_id = '-'.join(parts[:4]) + '-01'
-                # 只加载当前split的患者数据
-                if truncated_id in current_split_patient_ids:
-                    self.expressions_data[truncated_id] = tpm_df[full_patient_id].values.astype(np.float32)
-                    self.patient_id_mapping[truncated_id] = full_patient_id
+            matched_patient_id = None
+            
+            # 尝试直接匹配
+            if full_patient_id in current_split_patient_ids:
+                matched_patient_id = full_patient_id
             else:
-                # 只加载当前split的患者数据
-                if full_patient_id in current_split_patient_ids:
-                    self.expressions_data[full_patient_id] = tpm_df[full_patient_id].values.astype(np.float32)
-                    self.patient_id_mapping[full_patient_id] = full_patient_id
+                # 尝试多种格式转换后匹配
+                parts = full_patient_id.split('-')
+                candidate_ids = [full_patient_id]  # 原始格式
+                
+                if len(parts) >= 4:
+                    # TCGA格式：前4部分 + '-01'
+                    candidate_ids.append('-'.join(parts[:4]) + '-01')
+                    # 不带样本类型
+                    candidate_ids.append('-'.join(parts[:4]))
+                
+                if len(parts) >= 3:
+                    # 前3部分
+                    candidate_ids.append('-'.join(parts[:3]))
+                
+                # 检查是否有任何候选ID在期望的患者ID集合中
+                for candidate_id in candidate_ids:
+                    if candidate_id in current_split_patient_ids:
+                        matched_patient_id = candidate_id
+                        break
+            
+            # 如果匹配成功，加载数据
+            if matched_patient_id:
+                self.expressions_data[matched_patient_id] = tpm_df[full_patient_id].values.astype(np.float32)
+                self.patient_id_mapping[matched_patient_id] = full_patient_id
         print(f"✅ 加载了 {len(self.expressions_data)} 个患者的897基因表达数据（仅当前{self.split}集）")
+        
+        # 检查是否成功加载了数据
+        if len(self.expressions_data) == 0:
+            print(f"❌ 错误：未能加载任何患者的表达数据！")
+            print(f"   当前{self.split}集期望的患者数: {len(current_split_patient_ids)}")
+            if len(current_split_patient_ids) > 0:
+                print(f"   期望的患者ID示例（前5个）: {list(current_split_patient_ids)[:5]}")
+            print(f"   TPM CSV文件中的列数: {len(tpm_df.columns)}")
+            if len(tpm_df.columns) > 0:
+                print(f"   TPM CSV列名示例（前5个）: {list(tpm_df.columns)[:5]}")
+                # 尝试诊断：检查格式匹配
+                sample_expected = list(current_split_patient_ids)[0] if current_split_patient_ids else None
+                sample_csv = list(tpm_df.columns)[0] if len(tpm_df.columns) > 0 else None
+                if sample_expected and sample_csv:
+                    print(f"   格式诊断:")
+                    print(f"     - 期望的患者ID格式: {sample_expected}")
+                    print(f"     - CSV列名格式: {sample_csv}")
+                    # 尝试转换CSV列名看看是否匹配
+                    csv_parts = sample_csv.split('-')
+                    if len(csv_parts) >= 4:
+                        csv_truncated = '-'.join(csv_parts[:4]) + '-01'
+                        print(f"     - CSV列名转换后: {csv_truncated}")
+                        print(f"     - 是否匹配: {csv_truncated == sample_expected}")
+            raise ValueError(
+                f"未能加载任何患者的表达数据。请检查：\n"
+                f"1. TPM CSV文件路径是否正确: {self.tpm_csv_file}\n"
+                f"2. 患者ID格式是否匹配（slide_to_patient_mapping中的ID vs TPM CSV列名）\n"
+                f"3. 当前split是否包含有效的患者数据"
+            )
+        
         sample_patient = list(self.expressions_data.keys())[0]
         sample_sum = np.sum(self.expressions_data[sample_patient])
         print(f"验证 - 样本患者表达值总和: {sample_sum:.2f}")

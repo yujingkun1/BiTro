@@ -34,16 +34,16 @@ def parse_args():
     
     # 数据路径
     parser.add_argument("--graph-data-dir", type=str, 
-                       default="/root/autodl-tmp/bulk_static_graphs_new_all_graph",
+                       default="/root/autodl-tmp/bulk_BRCA_graphs_new_all_graph",
                        help="图数据目录")
     parser.add_argument("--gene-list-file", type=str,
-                       default="/root/autodl-tmp/common_genes_misc_tenx_zen_897.txt",
+                       default="/root/autodl-tmp/her_hvg_cut_1000.txt",
                        help="基因列表文件")
     parser.add_argument("--features-file", type=str,
                        default="/root/autodl-tmp/features.tsv",
                        help="特征文件")
     parser.add_argument("--tpm-csv-file", type=str,
-                       default="/root/autodl-tmp/tpm-TCGA-COAD-897-million.csv",
+                       default="/root/autodl-tmp/tpm-TCGA-BRCA-1000-million.csv",
                        help="TPM表达数据CSV文件")
     
     # 训练参数
