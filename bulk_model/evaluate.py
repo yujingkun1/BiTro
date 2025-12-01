@@ -172,6 +172,30 @@ def average_pairwise_pearson(vectors: List[np.ndarray] | np.ndarray) -> float:
     return float(np.mean(valid_values))
 
 
+def average_pairwise_js(vectors: List[np.ndarray] | np.ndarray, eps: float = 1e-12) -> float:
+    """计算样本之间的平均 JS 散度"""
+    if isinstance(vectors, list):
+        if not vectors:
+            return float("nan")
+        vectors = np.stack(vectors, axis=0)
+    if vectors.shape[0] < 2:
+        return float("nan")
+
+    vectors = np.clip(vectors.astype(np.float64), a_min=0.0, a_max=None)
+    sums = vectors.sum(axis=1, keepdims=True) + eps
+    probs = vectors / sums
+
+    total = 0.0
+    count = 0
+    for i in range(probs.shape[0]):
+        for j in range(i + 1, probs.shape[0]):
+            total += js_divergence(probs[i], probs[j], eps=eps)
+            count += 1
+    if count == 0:
+        return float("nan")
+    return float(total / count)
+
+
 def prepare_device(device_arg: str | None) -> torch.device:
     if device_arg:
         return torch.device(device_arg)
@@ -393,6 +417,9 @@ def evaluate():
     print("="*60)
     target_target_avg = average_pairwise_pearson(all_target_vectors)
     pred_pred_avg = average_pairwise_pearson(all_prediction_vectors)
+    target_target_js = average_pairwise_js(all_target_vectors)
+    pred_pred_js = average_pairwise_js(all_prediction_vectors)
+
     if math.isfinite(target_target_avg):
         print(f"原始样本之间平均 Pearson: {target_target_avg:.4f}")
     else:
@@ -401,6 +428,15 @@ def evaluate():
         print(f"预测样本之间平均 Pearson: {pred_pred_avg:.4f}")
     else:
         print("预测样本之间平均 Pearson: 无法计算（样本不足或存在零方差）")
+
+    if math.isfinite(target_target_js):
+        print(f"原始样本之间平均 JS 散度: {target_target_js:.4f}")
+    else:
+        print("原始样本之间平均 JS 散度: 无法计算（样本不足或存在零方差）")
+    if math.isfinite(pred_pred_js):
+        print(f"预测样本之间平均 JS 散度: {pred_pred_js:.4f}")
+    else:
+        print("预测样本之间平均 JS 散度: 无法计算（样本不足或存在零方差）")
     print("="*60)
     print(f"评估样本数: {len(per_sample_metrics)}")
     if pearson_values.size > 0:
