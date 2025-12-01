@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from torch.amp import autocast, GradScaler
@@ -6,6 +7,137 @@ import time
 import numpy as np
 import psutil
 import gc
+
+
+def load_spatial_pretrained_weights(
+    model: nn.Module,
+    spatial_checkpoint_path: str,
+    device: str | torch.device = "cuda",
+    freeze_backbone: bool = False,
+) -> nn.Module:
+    """
+    Load compatible weights from a pretrained spatial model checkpoint
+    into the bulk OptimizedTransformerPredictor to enable transfer learning.
+
+    The spatial model is `spitial_model.models.StaticGraphTransformerPredictor`
+    trained via `spitial_model/train_transfer_learning.py`.
+
+    This function:
+    - Loads the spatial checkpoint (state_dict)
+    - Copies over matching keys with identical tensor shapes:
+        * gnn.*
+        * feature_projection.*
+        * transformer.*
+        * output_projection.*  (only when shape matches num_genes)
+    - Skips spatial-specific parameters such as:
+        * gene_queries, gene_readout
+        * x_embed, y_embed
+    - Optionally freezes backbone layers (GNN + feature_projection + transformer)
+      while keeping output head trainable.
+    """
+    device = torch.device(device)
+
+    if not spatial_checkpoint_path:
+        print("⚠ 未提供 spatial 模型路径，跳过迁移学习初始化。")
+        return model
+
+    if not os.path.exists(spatial_checkpoint_path):
+        print(f"⚠ Spatial checkpoint 未找到: {spatial_checkpoint_path}")
+        return model
+
+    print("\n=== 从 Spatial 预训练模型初始化 Bulk 模型权重 ===")
+    print(f"Spatial checkpoint: {spatial_checkpoint_path}")
+
+    try:
+        spatial_state = torch.load(spatial_checkpoint_path, map_location=device)
+        # 兼容直接保存 state_dict 或包含 'state_dict' 的情况
+        if isinstance(spatial_state, dict) and "state_dict" in spatial_state:
+            spatial_state = spatial_state["state_dict"]
+        if not isinstance(spatial_state, dict):
+            raise ValueError("Spatial checkpoint 不包含有效的 state_dict 字典")
+
+        model_state = model.state_dict()
+
+        loaded_keys: list[str] = []
+        skipped_keys: list[str] = []
+        mismatched_keys: list[tuple[str, torch.Size, torch.Size]] = []
+
+        for key, value in spatial_state.items():
+            # 跳过明显的空间特异参数
+            if any(
+                s in key
+                for s in [
+                    "gene_queries",
+                    "gene_readout",
+                    "x_embed",
+                    "y_embed",
+                ]
+            ):
+                skipped_keys.append(key)
+                continue
+
+            if key in model_state:
+                if model_state[key].shape == value.shape:
+                    model_state[key] = value
+                    loaded_keys.append(key)
+                else:
+                    mismatched_keys.append((key, model_state[key].shape, value.shape))
+            else:
+                # 其他在 bulk 模型中不存在的 key 也跳过
+                skipped_keys.append(key)
+
+        model.load_state_dict(model_state, strict=False)
+
+        print(f"✓ 成功从 spatial 模型加载 {len(loaded_keys)} 层参数到 bulk 模型")
+        if loaded_keys:
+            print(f"  示例: {', '.join(loaded_keys[:5])}")
+
+        if mismatched_keys:
+            print(f"⚠ 因形状不匹配跳过 {len(mismatched_keys)} 层（例如输出 head 基因数不同）:")
+            for k, ms, ss in mismatched_keys[:5]:
+                print(f"  {k}: bulk {ms} vs spatial {ss}")
+            if len(mismatched_keys) > 5:
+                print(f"  ... 以及另外 {len(mismatched_keys) - 5} 层")
+
+        if skipped_keys:
+            print(f"ℹ 跳过 {len(skipped_keys)} 个 spatial 特有或 bulk 中不存在的参数（如 gene_queries/x_embed 等）")
+
+        if freeze_backbone:
+            print("\n=== 冻结 Bulk 模型 Backbone（GNN + feature_projection + transformer）===")
+            frozen_params = 0
+            trainable_params = 0
+
+            # 冻结 GNN
+            if hasattr(model, "gnn"):
+                for _, p in model.gnn.named_parameters():
+                    p.requires_grad = False
+                    frozen_params += p.numel()
+
+            # 冻结特征投影
+            if hasattr(model, "feature_projection"):
+                for _, p in model.feature_projection.named_parameters():
+                    p.requires_grad = False
+                    frozen_params += p.numel()
+
+            # 冻结 transformer
+            if hasattr(model, "transformer"):
+                for _, p in model.transformer.named_parameters():
+                    p.requires_grad = False
+                    frozen_params += p.numel()
+
+            # 统计仍然可训练的参数（例如 output_projection 的最后几层）
+            for name, p in model.named_parameters():
+                if p.requires_grad:
+                    trainable_params += p.numel()
+
+            print(f"✓ Backbone 冻结参数量: {frozen_params:,}")
+            print(f"✓ 仍可训练参数量: {trainable_params:,}")
+
+    except Exception as e:  # pylint: disable=broad-except
+        print(f"❌ 从 spatial checkpoint 加载权重失败: {e}")
+        print("将使用随机初始化的 bulk 模型继续训练。")
+
+    return model
 
 
 def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler=None,
@@ -309,7 +441,7 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
             best_test_loss = test_loss
             best_epoch = epoch + 1
             early_stopping_counter = 0
-            torch.save(model.state_dict(), "best_BRCA_lora_model_fix.pt")
+            torch.save(model.state_dict(), "best_BRCA_lora_model_transfer.pt")
             print(f"  *** 保存最佳模型 ***")
         else:
             early_stopping_counter += 1
@@ -330,7 +462,7 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
     plt.title('Optimized Bulk Static Training Loss (372 Genes, Multi-Graph Batch)')
     plt.legend()
     plt.grid(True)
-    plt.savefig('bulk_BRCA_lora_loss_fix.png')
+    plt.savefig('bulk_BRCA_lora_loss_Transfer.png')
     plt.close()
 
     return train_losses, test_losses

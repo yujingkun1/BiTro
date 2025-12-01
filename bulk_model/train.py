@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 from bulk_model.utils import check_environment_compatibility, load_gene_mapping
 from bulk_model.dataset import BulkStaticGraphDataset372, collate_fn_bulk_372
 from bulk_model.models import OptimizedTransformerPredictor
-from bulk_model.trainer import train_optimized_model
+from bulk_model.trainer import train_optimized_model, load_spatial_pretrained_weights
 
 # TF32/AMP 优化
 torch.set_float32_matmul_precision("medium")
@@ -51,14 +51,20 @@ def parse_args():
                        help="患者Batch Size (None=动态搜索)")
     parser.add_argument("--graph-batch-size", type=int, default=128,
                        help="图Batch Size")
-    parser.add_argument("--num-epochs", type=int, default=60,
+    parser.add_argument("--num-epochs", type=int, default=30,
                        help="训练轮数")
-    parser.add_argument("--learning-rate", type=float, default=1e-4,
+    parser.add_argument("--learning-rate", type=float, default=1e-5,
                        help="学习率")
     parser.add_argument("--weight-decay", type=float, default=1e-5,
                        help="权重衰减")
     parser.add_argument("--patience", type=int, default=15,
                        help="早停耐心值")
+
+    # 迁移学习：从 spatial 模型初始化
+    parser.add_argument("--spatial-model-path", type=str, default=None,
+                       help="可选：使用已经训练好的 spatial 模型 checkpoint 作为 bulk 预训练权重")
+    parser.add_argument("--freeze-backbone-from-spatial", action="store_true",
+                       help="如果提供 spatial 模型，是否冻结 bulk 的 GNN + feature_projection + transformer，仅训练输出头")
     
     # LoRA 参数
     parser.add_argument("--use-lora", action="store_true", default=True,
@@ -292,7 +298,7 @@ def main():
         total_params_wo_lora, trainable_params_wo_lora = count_parameters(model_without_lora)
         print(f"     ✓ 不带LoRA模型参数量计算完成")
         
-        # 创建带LoRA的实际模型
+        # 创建带LoRA的实际模型（后续可选地从 spatial 初始化）
         print("  2. 创建带LoRA的模型...")
         model = OptimizedTransformerPredictor(
             input_dim=train_dataset.feature_dim,
@@ -312,6 +318,15 @@ def main():
             lora_dropout=args.lora_dropout,
             lora_freeze_base=args.lora_freeze_base
         )
+
+        # 如果用户提供了 spatial checkpoint，则在此基础上做迁移学习初始化
+        if args.spatial_model_path:
+            model = load_spatial_pretrained_weights(
+                model,
+                spatial_checkpoint_path=args.spatial_model_path,
+                device=device,
+                freeze_backbone=args.freeze_backbone_from_spatial,
+            )
         
         total_params_with_lora, trainable_params_with_lora = count_parameters(model)
         print(f"     ✓ 带LoRA模型参数量计算完成")
@@ -374,6 +389,14 @@ def main():
             lora_dropout=args.lora_dropout,
             lora_freeze_base=args.lora_freeze_base
         )
+
+        if args.spatial_model_path:
+            model = load_spatial_pretrained_weights(
+                model,
+                spatial_checkpoint_path=args.spatial_model_path,
+                device=device,
+                freeze_backbone=args.freeze_backbone_from_spatial,
+            )
         
         total_params, trainable_params = count_parameters(model)
         frozen_params = total_params - trainable_params
