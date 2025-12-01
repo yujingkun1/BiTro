@@ -230,7 +230,7 @@ class StaticGraphTransformerPredictor(nn.Module):
                 pos = pos.to(device)
 
             pos_enc = self.generate_spatial_pos_encoding(pos, node_features.size(1))
-            
+
             # 保存序列和原始索引
             seq = node_features + pos_enc  # [S, E]
             valid_graphs_data.append({
@@ -278,7 +278,7 @@ class StaticGraphTransformerPredictor(nn.Module):
             
             # 提取该图的Transformer输出（去掉padding部分）
             H = transformer_output[i, :seq_len, :]  # [S, E]
-            
+
             # Gene-specific attention aggregation over nodes
             # Attention weights per gene over S nodes: softmax(Q H^T / sqrt(E))
             attn_logits = torch.matmul(self.gene_queries, H.transpose(0, 1)) / math.sqrt(self.embed_dim)  # [G, S]

@@ -191,6 +191,7 @@ class LoRAMultiheadSelfAttention(nn.Module):
                     # Fallback: try to get size and manually convert
                     # This shouldn't happen in practice, but handle it gracefully
                     raise RuntimeError("Cannot convert NestedTensor: to_padded_tensor not available")
+                # After conversion, get shape
                 B, S, E = query.shape
             except Exception as conv_e:
                 raise RuntimeError(f"Failed to convert NestedTensor to regular tensor: {conv_e}")

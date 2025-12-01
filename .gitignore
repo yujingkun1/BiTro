@@ -9,4 +9,5 @@
 *.json
 *.csv
 *.tif
+*.pkl
 *__pycache__

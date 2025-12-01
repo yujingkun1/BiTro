@@ -64,11 +64,11 @@ def main():
     features_dir = "/data/yujk/hovernet2feature/hest_normalized_dinov3"
 
     # Specify gene file
-    gene_file = "/data/yujk/hovernet2feature/HEST/tutorials/SA_process/common_genes_misc_tenx_zen_897.txt"
+    gene_file = "/data/yujk/hovernet2feature/cscc_coad_common_genes.txt"
 
     batch_size = 128
     num_epochs = 60
-    learning_rate = 1e-5
+    learning_rate = 1e-4
     weight_decay = 1e-5   # 恢复正常weight_decay
     feature_dim = 128
 
@@ -90,7 +90,7 @@ def main():
 
     # Gene variance normalization control
     # Set to True to apply per-gene variance normalization, False to disable
-    use_gene_normalization = False  # Change this to False to disable gene variance normalization
+    use_gene_normalization = True # Change this to False to disable gene variance normalization
 
     print("=== HEST Spatial Supervised Training ===")
     print("✓ Using direct file reading (no HEST API required)")
@@ -281,8 +281,8 @@ def main():
         # Train model
         train_losses, test_losses, epoch_mean_gene_corrs, epoch_overall_corrs = train_hest_graph_model(
             model, train_loader, test_loader, optimizer, scheduler,
-            num_epochs=num_epochs, device="cuda:1", patience=patience, min_delta=min_delta, fold_idx=fold_idx,
-            cluster_loss_weight=0, checkpoint_path=best_model_path
+            num_epochs=num_epochs, device="cuda:0", patience=patience, min_delta=min_delta, fold_idx=fold_idx,
+            cluster_loss_weight=0.1, checkpoint_path=best_model_path
         )
 
         # Load best model for evaluation

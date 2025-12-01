@@ -41,8 +41,11 @@ class BulkStaticGraphBuilder:
                  inter_patch_k_neighbors=6,          # patch间k近邻数量
                  use_deep_features=True,             # 使用深度特征
                  feature_dim=128,                    # 特征维度
-                 max_cells_per_patch=None):          # 每个patch的最大细胞数
-            
+                 max_cells_per_patch=None,           # 每个patch的最大细胞数
+                 max_train_slides=None,              # 训练集最多处理的特征文件数
+                 max_test_slides=None,               # 测试集最多处理的特征文件数
+                 checkpoint_dir=None):               # 检查点目录，用于断点续传
+        
         self.train_features_dir = train_features_dir
         self.test_features_dir = test_features_dir
         self.bulk_csv_path = bulk_csv_path
@@ -53,10 +56,21 @@ class BulkStaticGraphBuilder:
         self.use_deep_features = use_deep_features
         self.feature_dim = feature_dim
         self.max_cells_per_patch = max_cells_per_patch
+        self.max_train_slides = max_train_slides
+        self.max_test_slides = max_test_slides
+        self.checkpoint_dir = checkpoint_dir
         
         self.processed_data = {}
         self.bulk_data = None
         self.valid_patient_ids = []
+        self.case_to_bulk_cols = {}
+        self.selected_feature_files = {'train': [], 'test': []}
+        
+        # 如果指定了检查点目录，创建它
+        if self.checkpoint_dir:
+            os.makedirs(self.checkpoint_dir, exist_ok=True)
+            os.makedirs(os.path.join(self.checkpoint_dir, 'train'), exist_ok=True)
+            os.makedirs(os.path.join(self.checkpoint_dir, 'test'), exist_ok=True)
         
     def load_bulk_data(self):
         """加载bulk RNA-seq数据"""
@@ -68,31 +82,37 @@ class BulkStaticGraphBuilder:
         bulk_df = bulk_df.set_index('gene_name')
         
         original_ids = list(bulk_df.columns)
-        patient_ids = [pid[:19] for pid in original_ids]
-        patient_id_series = pd.Series(patient_ids)
+        case_ids = [pid[:12] for pid in original_ids]  # TCGA病例ID（例如 TCGA-3C-AALI）
+        case_id_series = pd.Series(case_ids)
         
-        # 去重处理
-        duplicate_ids = patient_id_series[patient_id_series.duplicated()].unique()
-        print(f"发现重复患者ID: {len(duplicate_ids)}")
+        # 建立病例ID到所有bulk列的映射，后续取平均
+        case_to_cols = {}
+        for case_id, original_id in zip(case_ids, original_ids):
+            case_to_cols.setdefault(case_id, []).append(original_id)
         
-        valid_patient_ids = patient_id_series[~patient_id_series.isin(duplicate_ids)].unique()
-        valid_original_ids = [oid for oid in original_ids if oid[:19] in valid_patient_ids]
-        bulk_df = bulk_df[valid_original_ids]
+        multi_col_cases = sum(1 for cols in case_to_cols.values() if len(cols) > 1)
+        print(f"病例总数: {len(case_to_cols)}, 其中 {multi_col_cases} 个病例拥有多列bulk数据（将取平均）")
         
         self.bulk_data = bulk_df
-        self.valid_patient_ids = valid_patient_ids
+        self.case_to_bulk_cols = case_to_cols
+        self.valid_patient_ids = list(case_to_cols.keys())
         
         print(f"Bulk数据形状: {bulk_df.shape}")
-        print(f"有效患者ID数: {len(valid_patient_ids)}")
+        print(f"有效病例ID数: {len(self.valid_patient_ids)}")
         
     def extract_slide_id(self, file_path):
         """从文件路径或文件名提取切片ID（包括UUID）"""
         basename = os.path.basename(file_path)
         # 从文件名中提取完整的切片标识符
-        # 例如：TCGA-AA-3872-01A-01-TS1.4f7d5598-e36a-4e30-9b7b-ab55cc6fc3a0_tile36_features.parquet
-        # 提取：TCGA-AA-3872-01A-01-TS1.4f7d5598-e36a-4e30-9b7b-ab55cc6fc3a0
+        # 支持多种格式：
+        # 1. TCGA-AA-3872-01A-01-TS1.4f7d5598-e36a-4e30-9b7b-ab55cc6fc3a0_tile36_features.parquet
+        # 2. TCGA-A2-A0YI-01A-03-TSC.315f5bb4-4ef4-471e-b5b4-ae73a6038c20_features.parquet
+        # 3. TCGA-AA-3872-01A-01-BS1.e29045b5-113d-4dba-b03b-ba2e0d82a388_patch_tile_542_level0_5540-10952-5796-11208.png
         if '_tile36_features.parquet' in basename:
             return basename.replace('_tile36_features.parquet', '')
+        elif '_features.parquet' in basename:
+            # 新格式：TCGA-A2-A0YI-01A-03-TSC.315f5bb4-4ef4-471e-b5b4-ae73a6038c20_features.parquet
+            return basename.replace('_features.parquet', '')
         elif '_patch_tile_' in basename:
             # patch文件格式：TCGA-AA-3872-01A-01-BS1.e29045b5-113d-4dba-b03b-ba2e0d82a388_patch_tile_542_level0_5540-10952-5796-11208.png
             # 提取：TCGA-AA-3872-01A-01-BS1.e29045b5-113d-4dba-b03b-ba2e0d82a388
@@ -104,11 +124,11 @@ class BulkStaticGraphBuilder:
     def extract_patient_id_from_slide(self, slide_id):
         """从切片ID提取患者ID"""
         # 从 TCGA-AA-3872-01A-01-TS1.4f7d5598-e36a-4e30-9b7b-ab55cc6fc3a0 
-        # 提取 TCGA-AA-3872-01A-01
+        # 提取病例ID TCGA-AA-3872
         parts = slide_id.split('-')
-        if len(parts) >= 4:
-            return '-'.join(parts[:4]) + '-01'
-        return slide_id[:19]
+        if len(parts) >= 3:
+            return '-'.join(parts[:3])
+        return slide_id[:12]
         
     def find_patch_files_by_slide(self, slide_id):
         """根据切片ID查找对应的patch文件"""
@@ -225,67 +245,71 @@ class BulkStaticGraphBuilder:
         
         return patches
     
+    def build_single_patch_graph(self, patch_cells, patch_id):
+        """构建单个patch的图结构（流式处理，立即释放资源）"""
+        if len(patch_cells) < 1:
+            return None
+        
+        if len(patch_cells) == 1:
+            # 单个细胞的patch
+            cell_row = patch_cells.iloc[0]
+            cell_features = self.extract_cell_feature_vector(cell_row)
+            x = torch.tensor([cell_features], dtype=torch.float32)
+            edge_index = torch.empty((2, 0), dtype=torch.long)
+            pos = torch.tensor([[cell_row['x'], cell_row['y']]], dtype=torch.float32)
+            return Data(x=x, edge_index=edge_index, pos=pos)
+        
+        # 提取位置和特征（使用patch内相对坐标）
+        positions = patch_cells[['x', 'y']].values
+        cell_features = np.array([
+            self.extract_cell_feature_vector(row) 
+            for _, row in patch_cells.iterrows()
+        ])
+        
+        # 计算距离矩阵
+        distances = squareform(pdist(positions))
+        
+        # 基于距离阈值构建邻接矩阵
+        adj_matrix = (distances <= self.intra_patch_distance_threshold) & (distances > 0)
+        
+        # 转换为边列表
+        edge_indices = np.where(adj_matrix)
+        edge_index = torch.tensor(np.vstack(edge_indices), dtype=torch.long)
+        
+        # 如果没有边，使用k近邻连接
+        if edge_index.shape[1] == 0:
+            k = min(3, len(patch_cells) - 1)
+            if k > 0:
+                nbrs = NearestNeighbors(n_neighbors=k+1).fit(positions)
+                _, indices = nbrs.kneighbors(positions)
+                
+                edges = []
+                for i, neighbors in enumerate(indices):
+                    for neighbor in neighbors[1:]:  # 跳过自己
+                        edges.extend([[i, neighbor], [neighbor, i]])
+                
+                if edges:
+                    edge_index = torch.tensor(np.array(edges).T, dtype=torch.long)
+                else:
+                    edge_index = torch.empty((2, 0), dtype=torch.long)
+        
+        # 创建图数据
+        x = torch.tensor(cell_features, dtype=torch.float32)
+        pos = torch.tensor(positions, dtype=torch.float32)
+        
+        return Data(x=x, edge_index=edge_index, pos=pos)
+    
     def build_intra_patch_graphs(self, patches):
-        """构建patch内的图结构（基于细胞）"""
+        """构建patch内的图结构（基于细胞）- 保留用于兼容性"""
         intra_patch_graphs = {}
         
         for patch_info in tqdm(patches, desc="构建patch内图"):
             patch_id = patch_info['patch_id']
             patch_cells = patch_info['cells']
             
-            if len(patch_cells) < 2:
-                # 单个细胞的patch
-                if len(patch_cells) == 1:
-                    cell_row = patch_cells.iloc[0]
-                    cell_features = self.extract_cell_feature_vector(cell_row)
-                    x = torch.tensor([cell_features], dtype=torch.float32)
-                    edge_index = torch.empty((2, 0), dtype=torch.long)
-                    pos = torch.tensor([[cell_row['x'], cell_row['y']]], dtype=torch.float32)
-                    
-                    graph = Data(x=x, edge_index=edge_index, pos=pos)
-                    intra_patch_graphs[patch_id] = graph
-                continue
-            
-            # 提取位置和特征（使用patch内相对坐标）
-            positions = patch_cells[['x', 'y']].values
-            cell_features = np.array([
-                self.extract_cell_feature_vector(row) 
-                for _, row in patch_cells.iterrows()
-            ])
-            
-            # 计算距离矩阵
-            distances = squareform(pdist(positions))
-            
-            # 基于距离阈值构建邻接矩阵
-            adj_matrix = (distances <= self.intra_patch_distance_threshold) & (distances > 0)
-            
-            # 转换为边列表
-            edge_indices = np.where(adj_matrix)
-            edge_index = torch.tensor(np.vstack(edge_indices), dtype=torch.long)
-            
-            # 如果没有边，使用k近邻连接
-            if edge_index.shape[1] == 0:
-                k = min(3, len(patch_cells) - 1)
-                if k > 0:
-                    nbrs = NearestNeighbors(n_neighbors=k+1).fit(positions)
-                    _, indices = nbrs.kneighbors(positions)
-                    
-                    edges = []
-                    for i, neighbors in enumerate(indices):
-                        for neighbor in neighbors[1:]:  # 跳过自己
-                            edges.extend([[i, neighbor], [neighbor, i]])
-                    
-                    if edges:
-                        edge_index = torch.tensor(np.array(edges).T, dtype=torch.long)
-                    else:
-                        edge_index = torch.empty((2, 0), dtype=torch.long)
-            
-            # 创建图数据
-            x = torch.tensor(cell_features, dtype=torch.float32)
-            pos = torch.tensor(positions, dtype=torch.float32)
-            
-            graph = Data(x=x, edge_index=edge_index, pos=pos)
-            intra_patch_graphs[patch_id] = graph
+            graph = self.build_single_patch_graph(patch_cells, patch_id)
+            if graph is not None:
+                intra_patch_graphs[patch_id] = graph
         
         return intra_patch_graphs
     
@@ -327,6 +351,44 @@ class BulkStaticGraphBuilder:
         
         return inter_patch_graph
     
+    def build_inter_patch_graph_from_centers(self, patch_centers):
+        """从patch中心点构建patch间的图结构（流式处理版本）"""
+        if len(patch_centers) < 2:
+            # 只有一个patch的情况
+            if len(patch_centers) == 1:
+                patch_center = patch_centers[0]
+                patch_features = torch.tensor([patch_center], dtype=torch.float32)
+                edge_index = torch.empty((2, 0), dtype=torch.long)
+                pos = torch.tensor([patch_center], dtype=torch.float32)
+                return Data(x=patch_features, edge_index=edge_index, pos=pos)
+            else:
+                # 没有patch的情况
+                return Data(x=torch.empty((0, 2)), edge_index=torch.empty((2, 0)), pos=torch.empty((0, 2)))
+        
+        # 使用patch中心点
+        patch_positions = np.array(patch_centers)
+        
+        # 使用k近邻构建patch间连接
+        k = min(self.inter_patch_k_neighbors, len(patch_centers) - 1)
+        nbrs = NearestNeighbors(n_neighbors=k+1).fit(patch_positions)
+        _, indices = nbrs.kneighbors(patch_positions)
+        
+        # 构建边列表
+        edges = []
+        for i, neighbors in enumerate(indices):
+            for neighbor in neighbors[1:]:  # 跳过自己
+                edges.extend([[i, neighbor], [neighbor, i]])
+        
+        edge_index = torch.tensor(np.array(edges).T, dtype=torch.long) if edges else torch.empty((2, 0), dtype=torch.long)
+        
+        # patch特征：使用位置特征
+        patch_features = torch.tensor(patch_positions, dtype=torch.float32)
+        pos = torch.tensor(patch_positions, dtype=torch.float32)
+        
+        inter_patch_graph = Data(x=patch_features, edge_index=edge_index, pos=pos)
+        
+        return inter_patch_graph
+    
     def extract_cell_feature_vector(self, cell_row):
         """提取细胞特征向量"""
         if self.use_deep_features:
@@ -347,10 +409,8 @@ class BulkStaticGraphBuilder:
                 features = np.pad(features, (0, self.feature_dim - len(features)), mode='constant')
             return features[:self.feature_dim]
     
-    def load_slide_features_from_dino_files(self, split='train'):
-        """直接从DINO parquet文件加载所有切片的细胞特征数据 - 切片级别匹配"""
-        print(f"=== 从DINO文件加载{split}集切片特征数据 ===")
-        
+    def get_feature_file_list(self, split='train'):
+        """获取特征文件列表（不加载数据）"""
         # 根据split选择目录
         if split == 'train':
             features_dir = self.train_features_dir
@@ -365,21 +425,126 @@ class BulkStaticGraphBuilder:
                     full_path = os.path.join(root, file)
                     feature_files.append(full_path)
         
-        print(f"找到 {len(feature_files)} 个{split}集特征文件")
+        feature_files = sorted(feature_files)
+        limit = self.max_train_slides if split == 'train' else self.max_test_slides
+        if limit is not None:
+            original_count = len(feature_files)
+            feature_files = feature_files[:limit]
+            print(f"找到 {original_count} 个{split}集特征文件，选取前 {len(feature_files)} 个进行构建")
+        else:
+            print(f"找到 {len(feature_files)} 个{split}集特征文件（全部使用）")
         
-        # 加载每个切片的数据
-        slides_data = {}
+        # 记录被选取的特征文件名
+        self.selected_feature_files[split] = [os.path.basename(p) for p in feature_files]
         
-        for feature_file in tqdm(feature_files, desc=f"加载{split}集DINO特征"):
+        return feature_files
+    
+    def save_slide_checkpoint(self, slide_id, slide_data, split='train'):
+        """保存单个切片的检查点"""
+        if not self.checkpoint_dir:
+            return
+        
+        # 使用安全的文件名（替换特殊字符）
+        safe_slide_id = slide_id.replace('/', '_').replace('\\', '_').replace(':', '_')
+        checkpoint_path = os.path.join(self.checkpoint_dir, split, f"{safe_slide_id}.pkl")
+        
+        try:
+            with open(checkpoint_path, 'wb') as f:
+                pickle.dump(slide_data, f)
+        except Exception as e:
+            print(f"警告: 无法保存检查点 {checkpoint_path}: {e}")
+    
+    def load_slide_checkpoint(self, slide_id, split='train'):
+        """加载单个切片的检查点"""
+        if not self.checkpoint_dir:
+            return None
+        
+        safe_slide_id = slide_id.replace('/', '_').replace('\\', '_').replace(':', '_')
+        checkpoint_path = os.path.join(self.checkpoint_dir, split, f"{safe_slide_id}.pkl")
+        
+        if os.path.exists(checkpoint_path):
+            try:
+                with open(checkpoint_path, 'rb') as f:
+                    return pickle.load(f)
+            except Exception as e:
+                print(f"警告: 无法加载检查点 {checkpoint_path}: {e}")
+                return None
+        return None
+    
+    def load_all_checkpoints(self, split='train'):
+        """加载所有已保存的检查点"""
+        if not self.checkpoint_dir:
+            return {}
+        
+        checkpoint_dir = os.path.join(self.checkpoint_dir, split)
+        if not os.path.exists(checkpoint_dir):
+            return {}
+        
+        checkpoints = {}
+        checkpoint_files = [f for f in os.listdir(checkpoint_dir) if f.endswith('.pkl')]
+        
+        print(f"  发现 {len(checkpoint_files)} 个已保存的{split}集检查点")
+        
+        for checkpoint_file in tqdm(checkpoint_files, desc=f"加载{split}集检查点"):
+            checkpoint_path = os.path.join(checkpoint_dir, checkpoint_file)
+            try:
+                with open(checkpoint_path, 'rb') as f:
+                    slide_data = pickle.load(f)
+                    slide_id = slide_data.get('slide_id', checkpoint_file.replace('.pkl', ''))
+                    checkpoints[slide_id] = slide_data
+            except Exception as e:
+                print(f"警告: 无法加载检查点 {checkpoint_path}: {e}")
+        
+        return checkpoints
+    
+    def is_slide_processed(self, slide_id, split='train'):
+        """检查切片是否已处理"""
+        if not self.checkpoint_dir:
+            return False
+        
+        safe_slide_id = slide_id.replace('/', '_').replace('\\', '_').replace(':', '_')
+        checkpoint_path = os.path.join(self.checkpoint_dir, split, f"{safe_slide_id}.pkl")
+        return os.path.exists(checkpoint_path)
+    
+    def process_all_slides_new_logic(self):
+        """使用新逻辑处理所有切片数据：按切片级别匹配patch，逐个加载和处理切片以减少内存占用，支持断点续传"""
+        print("=== 使用切片级别匹配逻辑处理所有数据（逐个切片处理，支持断点续传）===")
+        
+        # 如果启用了检查点，先加载已处理的数据
+        if self.checkpoint_dir:
+            print("\n=== 加载已保存的检查点 ===")
+            self.processed_data['train'] = self.load_all_checkpoints('train')
+            self.processed_data['test'] = self.load_all_checkpoints('test')
+            print(f"  已加载训练集切片: {len(self.processed_data['train'])}")
+            print(f"  已加载测试集切片: {len(self.processed_data['test'])}")
+        
+        # 获取特征文件列表（不加载数据）
+        train_feature_files = self.get_feature_file_list('train')
+        test_feature_files = self.get_feature_file_list('test')
+        
+        # 处理训练集：逐个加载和处理切片
+        print("\n处理训练集...")
+        if 'train' not in self.processed_data:
+            self.processed_data['train'] = {}
+        
+        processed_count = 0
+        skipped_count = 0
+        
+        for feature_file in tqdm(train_feature_files, desc="处理训练集切片"):
             # 提取切片ID（包括UUID）
             slide_id = self.extract_slide_id(feature_file)
+            
+            # 检查是否已处理（断点续传）
+            if slide_id in self.processed_data['train'] or self.is_slide_processed(slide_id, 'train'):
+                skipped_count += 1
+                continue
             
             # 提取患者ID，检查是否在有效患者列表中
             patient_id = self.extract_patient_id_from_slide(slide_id)
             if patient_id not in self.valid_patient_ids:
                 continue
-                
-            # 加载parquet文件
+            
+            # 加载并处理单个切片
             try:
                 df = pd.read_parquet(feature_file)
                 
@@ -393,45 +558,83 @@ class BulkStaticGraphBuilder:
                 # 转换坐标为绝对坐标
                 df_processed = self.convert_to_absolute_coordinates(df.copy())
                 
-                slides_data[slide_id] = {
-                    'slide_id': slide_id,
-                    'patient_id': patient_id,
-                    'cells_df': df_processed,
-                    'num_cells': len(df_processed)
-                }
+                # 立即处理这个切片
+                result = self.process_single_slide_new_logic(df_processed, slide_id, patient_id)
+                if result:
+                    self.processed_data['train'][slide_id] = result
+                    # 立即保存检查点
+                    self.save_slide_checkpoint(slide_id, result, 'train')
+                    processed_count += 1
                 
-                print(f"  加载切片 {slide_id} (患者 {patient_id}): {len(df_processed)} 个细胞")
+                # 释放内存
+                del df, df_processed, result
                 
             except Exception as e:
-                print(f"错误: 无法加载 {feature_file}: {e}")
+                print(f"错误: 无法处理 {feature_file}: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
         
-        print(f"成功加载 {len(slides_data)} 个{split}集切片的特征数据")
-        return slides_data
-    
-    def process_all_slides_new_logic(self):
-        """使用新逻辑处理所有切片数据：按切片级别匹配patch"""
-        print("=== 使用切片级别匹配逻辑处理所有数据 ===")
+        if skipped_count > 0:
+            print(f"  跳过已处理的切片: {skipped_count} 个")
+        print(f"  新处理切片: {processed_count} 个")
         
-        # 分别加载训练集和测试集的DINO特征数据（按切片）
-        train_slides_data = self.load_slide_features_from_dino_files('train')
-        test_slides_data = self.load_slide_features_from_dino_files('test')
-        
-        # 处理训练集
-        print("\n处理训练集...")
-        self.processed_data['train'] = {}
-        for slide_id, slide_data in tqdm(train_slides_data.items(), desc="处理训练集切片"):
-            result = self.process_single_slide_new_logic(slide_data['cells_df'], slide_id, slide_data['patient_id'])
-            if result:
-                self.processed_data['train'][slide_id] = result
-        
-        # 处理测试集
+        # 处理测试集：逐个加载和处理切片
         print("\n处理测试集...")
-        self.processed_data['test'] = {}
-        for slide_id, slide_data in tqdm(test_slides_data.items(), desc="处理测试集切片"):
-            result = self.process_single_slide_new_logic(slide_data['cells_df'], slide_id, slide_data['patient_id'])
-            if result:
-                self.processed_data['test'][slide_id] = result
+        if 'test' not in self.processed_data:
+            self.processed_data['test'] = {}
+        
+        processed_count = 0
+        skipped_count = 0
+        
+        for feature_file in tqdm(test_feature_files, desc="处理测试集切片"):
+            # 提取切片ID（包括UUID）
+            slide_id = self.extract_slide_id(feature_file)
+            
+            # 检查是否已处理（断点续传）
+            if slide_id in self.processed_data['test'] or self.is_slide_processed(slide_id, 'test'):
+                skipped_count += 1
+                continue
+            
+            # 提取患者ID，检查是否在有效患者列表中
+            patient_id = self.extract_patient_id_from_slide(slide_id)
+            if patient_id not in self.valid_patient_ids:
+                continue
+            
+            # 加载并处理单个切片
+            try:
+                df = pd.read_parquet(feature_file)
+                
+                # 检查必要的列
+                required_columns = [f'feature_{i}' for i in range(128)] + ['x', 'y', 'image_name', 'cluster_label']
+                missing_cols = [col for col in required_columns if col not in df.columns]
+                if missing_cols:
+                    print(f"警告: 文件 {feature_file} 缺少列: {missing_cols}")
+                    continue
+                
+                # 转换坐标为绝对坐标
+                df_processed = self.convert_to_absolute_coordinates(df.copy())
+                
+                # 立即处理这个切片
+                result = self.process_single_slide_new_logic(df_processed, slide_id, patient_id)
+                if result:
+                    self.processed_data['test'][slide_id] = result
+                    # 立即保存检查点
+                    self.save_slide_checkpoint(slide_id, result, 'test')
+                    processed_count += 1
+                
+                # 释放内存
+                del df, df_processed, result
+                
+            except Exception as e:
+                print(f"错误: 无法处理 {feature_file}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        if skipped_count > 0:
+            print(f"  跳过已处理的切片: {skipped_count} 个")
+        print(f"  新处理切片: {processed_count} 个")
         
         print(f"\n处理完成:")
         print(f"  - 训练集切片: {len(self.processed_data['train'])}")
@@ -469,22 +672,31 @@ class BulkStaticGraphBuilder:
         all_cell_positions = cells_df[['x', 'y']].values.astype(np.float32)
         cluster_labels = cells_df['cluster_label'].values
         
-        # 尝试构建图结构（使用切片ID查找对应的patch）
+        # 获取patch文件列表
         patch_files = self.find_patch_files_by_slide(slide_id)
         print(f"  - 匹配的Patch文件数量: {len(patch_files)}")
         
         has_graphs = False
         intra_patch_graphs = {}
-        inter_patch_graph = Data(x=torch.empty((0, 2)), edge_index=torch.empty((2, 0)), pos=torch.empty((0, 2)))
         patches = []
         
         if len(patch_files) > 0:
-            # 尝试将细胞分配到patch并构建图
-            patches = self.assign_cells_to_patches(cells_df, patch_files)
+            # 将细胞分配到patch（assign_cells_to_patches内部会修改cells_df的copy，我们需要获取patch_id信息）
+            # 先复制一份用于分配，保留原始index
+            cells_df_with_patch = cells_df.copy()
+            patches = self.assign_cells_to_patches(cells_df_with_patch, patch_files)
+            
+            # 将patch_id信息从cells_df_with_patch复制回原始cells_df
+            if 'patch_id' in cells_df_with_patch.columns:
+                cells_df['patch_id'] = cells_df_with_patch['patch_id'].values
+            else:
+                cells_df['patch_id'] = -1
             
             if len(patches) > 0:
-                # 构建图结构
+                # 构建patch内图
                 intra_patch_graphs = self.build_intra_patch_graphs(patches)
+                
+                # 构建patch间图
                 inter_patch_graph = self.build_inter_patch_graph(patches)
                 has_graphs = True
                 
@@ -492,8 +704,11 @@ class BulkStaticGraphBuilder:
                 print(f"  - Patch间图: {inter_patch_graph.edge_index.shape[1]} 条边")
             else:
                 print(f"  - 未能成功分配细胞到patch，将保留原始特征")
+                inter_patch_graph = Data(x=torch.empty((0, 2)), edge_index=torch.empty((2, 0)), pos=torch.empty((0, 2)))
         else:
             print(f"  - 未找到匹配的patch文件，将保留原始特征")
+            cells_df['patch_id'] = -1
+            inter_patch_graph = Data(x=torch.empty((0, 2)), edge_index=torch.empty((2, 0)), pos=torch.empty((0, 2)))
         
         return {
             'slide_id': slide_id,
@@ -534,10 +749,11 @@ class BulkStaticGraphBuilder:
             
             # 为这个patch中的每个细胞建立映射
             for cell_idx in patch_cells.index:
-                cell_to_graph[cell_idx] = {
-                    'patch_id': patch_id,
-                    'has_graph': True
-                }
+                if cell_idx in cells_df.index:
+                    cell_to_graph[cell_idx] = {
+                        'patch_id': patch_id,
+                        'has_graph': True
+                    }
         
         return cell_to_graph
     
@@ -546,19 +762,35 @@ class BulkStaticGraphBuilder:
         if self.bulk_data is None:
             return None
             
-        # 找到匹配的列
-        bulk_col = [col for col in self.bulk_data.columns if col[:19] == patient_id]
-        if len(bulk_col) == 1:
-            return self.bulk_data[bulk_col[0]].values.astype(np.float32)
-        elif len(bulk_col) > 1:
-            # 多个bulk列：取平均值
-            print(f"信息: 患者 {patient_id} 有 {len(bulk_col)} 列bulk数据，使用平均值")
-            print(f"  - 可用列: {bulk_col}")
-            bulk_values = self.bulk_data[bulk_col].values.astype(np.float32)
-            return np.mean(bulk_values, axis=1)
-        else:
-            print(f"警告: 未找到患者 {patient_id} 的bulk数据")
+        # 找到匹配的列（病例级）
+        bulk_cols = self.case_to_bulk_cols.get(patient_id, [])
+        if not bulk_cols:
+            print(f"警告: 未找到病例 {patient_id} 的bulk数据")
             return None
+        
+        bulk_values = self.bulk_data[bulk_cols].values.astype(np.float32)
+        if bulk_values.ndim == 2 and bulk_values.shape[1] > 1:
+            # 多列：取平均值
+            print(f"信息: 病例 {patient_id} 有 {bulk_values.shape[1]} 列bulk数据，使用平均值")
+            print(f"  - 可用列: {bulk_cols}")
+            return np.mean(bulk_values, axis=1)
+        
+        # 单列：直接返回（values 可能是(N, 1)，需要压缩为(N,))
+        return bulk_values.reshape(-1)
+    
+    def save_selected_feature_filenames(self, output_dir):
+        """保存被选中的训练/测试特征文件名"""
+        print("=== 保存特征文件名列表 ===")
+        
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        for split in ['train', 'test']:
+            filenames = self.selected_feature_files.get(split, [])
+            txt_path = os.path.join(output_dir, f"{split}_selected_feature_files.txt")
+            with open(txt_path, 'w') as f:
+                f.write('\n'.join(filenames))
+            print(f"  - {split}集文件列表: {txt_path} (共 {len(filenames)} 个)")
     
     def save_graphs_slide_logic(self, output_dir):
         """保存构建的图数据 - 切片逻辑：保存完整的细胞特征数据和切片映射"""
@@ -828,12 +1060,13 @@ def main():
     """主函数"""
     
     # 配置参数
-    train_features_dir = "/data/yujk/hovernet2feature/hovernet2feature/extracted_features_dino_tile36_train"
-    test_features_dir = "/data/yujk/hovernet2feature/hovernet2feature/extracted_features_dino_tile36_test"
-    bulk_csv_path = "/data/yujk/hovernet2feature/basic_model/tpm-TCGA-COAD_intersection_million.csv"
-    patches_dir = "/data/yujk/hovernet2feature/output_patches"
-    wsi_input_dir = "/data/yujk/hovernet2feature/WSI/COAD"
-    output_dir = "/data/yujk/hovernet2feature/bulk_static_graphs_new_all_graph"
+    train_features_dir = "/mnt/data_sdc1/graph_data/extracted_features_dinov3_train"
+    test_features_dir = "/mnt/data_sdc1/graph_data/extracted_features_dinov3_test"
+    bulk_csv_path = "/mnt/data_sdc1/graph_data/tpm-TCGA-BRCA.csv"
+    patches_dir = "/mnt/data_sdc1/graph_data/output_patches"
+    wsi_input_dir = "/mnt/data_sdc1/graph_data/BRCA"
+    output_dir = "/data/yujk/hovernet2feature/Cell2Gene/bulk_BRCA_graphs_new_all_graph_300"
+    checkpoint_dir = "/data/yujk/hovernet2feature/Cell2Gene/bulk_BRCA_graphs_checkpoints"  # 检查点目录，用于断点续传
     
     # 图构建参数（方案3：提升GPU利用率的新参数）
     intra_patch_distance_threshold = 256   # patch内细胞连接距离阈值（像素）- 从250增加到256
@@ -841,20 +1074,28 @@ def main():
     use_deep_features = True              # 使用深度特征
     feature_dim = 128                     # 特征维度
     max_cells_per_patch = None           # 每个patch的最大细胞数 - 不限制
+    max_train_slides = 300              # 仅处理训练集前N个特征文件，None表示全部
+    max_test_slides = 75               # 仅处理测试集前N个特征文件，None表示全部
     
-    print("=== Bulk数据集静态图构建（使用预分割patch）- 新逻辑版本 ===")
+    print("=== Bulk数据集静态图构建（使用预分割patch）- 新逻辑版本（支持断点续传）===")
     print(f"训练特征目录: {train_features_dir}")
     print(f"测试特征目录: {test_features_dir}")
     print(f"Bulk数据文件: {bulk_csv_path}")
     print(f"Patch目录: {patches_dir}")
     print(f"WSI输入目录: {wsi_input_dir}")
     print(f"输出目录: {output_dir}")
+    print(f"检查点目录: {checkpoint_dir}")
     print(f"配置参数:")
     print(f"  - Patch内距离阈值: {intra_patch_distance_threshold}px")
     print(f"  - Patch间k近邻: {inter_patch_k_neighbors}")
+    train_limit_text = max_train_slides if max_train_slides is not None else '全部'
+    test_limit_text = max_test_slides if max_test_slides is not None else '全部'
     print(f"  - 使用深度特征: {use_deep_features}")
     print(f"  - 特征维度: {feature_dim}")
     print(f"  - 每patch最大细胞数: {max_cells_per_patch}")
+    print(f"  - 训练集特征文件上限: {train_limit_text}")
+    print(f"  - 测试集特征文件上限: {test_limit_text}")
+    print(f"  - 断点续传: {'启用' if checkpoint_dir else '禁用'}")
     
     # 检查输入目录
     for path, name in [(train_features_dir, "训练特征目录"), (test_features_dir, "测试特征目录"), 
@@ -875,7 +1116,10 @@ def main():
             inter_patch_k_neighbors=inter_patch_k_neighbors,
             use_deep_features=use_deep_features,
             feature_dim=feature_dim,
-            max_cells_per_patch=max_cells_per_patch
+            max_cells_per_patch=max_cells_per_patch,
+            max_train_slides=max_train_slides,
+            max_test_slides=max_test_slides,
+            checkpoint_dir=checkpoint_dir
         )
         
         # 加载bulk数据
@@ -886,6 +1130,7 @@ def main():
         
         # 构建并保存图 - 使用切片级别保存逻辑
         metadata = builder.save_graphs_slide_logic(output_dir)
+        builder.save_selected_feature_filenames(output_dir)
         
         print("\n=== 图构建完成（切片级别匹配，0%数据丢失版本）===")
         for split in ['train', 'test']:
