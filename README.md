@@ -1,6 +1,6 @@
-## Cell2Gene: Spatial Gene Expression Prediction from Histology
+## CIGAR: Cell-to-Gene Prediction from Pathology Images via Transfer Learning Across Bulk and Spatial Transcriptomics
 
-Cell2Gene is a modular pipeline for **predicting spatial gene expression from histology images** using **cell-level graphs**, **Graph Neural Networks (GNNs)** and **Transformers**.  
+CIGAR is a modular pipeline for **predicting spatial gene expression from histology images** using **cell-level graphs**, **Graph Neural Networks (GNNs)** and **Transformers**.  
 The project supports both **spatial transcriptomics (HEST)** and **bulk RNA‑seq** settings, with optional **transfer learning from bulk models to spatial models**.
 
 ---
