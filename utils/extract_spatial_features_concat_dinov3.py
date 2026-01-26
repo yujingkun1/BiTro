@@ -60,7 +60,8 @@ class HESTCellFeatureExtractor:
                  bulk_pca_model_path=None,     # 已移除，仅保留独立PCA
                  cell_patch_size=48,           # 细胞patch大小，基于实际细胞大小分析
                  dinov3_feature_dim=1024,     # DINOv3-L特征维度
-                 final_dino_dim=128,          # PCA降维后DINO维度（统一为128）
+                 final_dino_dim=64,           # 细胞PCA降维维度（默认64）
+                 spot_pca_dim=64,             # spot图像PCA降维维度（默认64）
                  device='cuda',
                  dino_batch_size=256,         # 大幅增加DINOv3批处理大小
                  cell_batch_size=50000,       # 大幅增加细胞批处理大小
@@ -82,8 +83,9 @@ class HESTCellFeatureExtractor:
         self.bulk_pca_model_path = bulk_pca_model_path
         self.cell_patch_size = cell_patch_size
         self.dinov3_feature_dim = dinov3_feature_dim
-        self.final_dino_dim = final_dino_dim
-        self.final_feature_dim = final_dino_dim  # 只使用DINOv3特征，128维
+        self.final_dino_dim = final_dino_dim  # 细胞特征PCA维度
+        self.spot_pca_dim = spot_pca_dim      # spot特征PCA维度
+        self.final_feature_dim = self.final_dino_dim + self.spot_pca_dim
         self.device = device
         self.dino_batch_size = dino_batch_size
         self.cell_batch_size = cell_batch_size
@@ -114,7 +116,8 @@ class HESTCellFeatureExtractor:
         print(f"  - 细胞批处理大小: {self.cell_batch_size}")
         print(f"  - 多进程工作者: {self.num_workers}")
         print(f"  - 设备: {self.device}")
-        print(f"  - 最终特征维度: {self.final_feature_dim} (仅DINOv3+PCA)")
+        print(
+            f"  - 最终特征维度: {self.final_feature_dim} (spot {self.spot_pca_dim} + cell {self.final_dino_dim})")
         print(f"  - 模型一致性: 使用DINOv3-L")
 
     def init_dinov3_model(self):
@@ -389,6 +392,53 @@ class HESTCellFeatureExtractor:
         print(f"  细胞数量: {len(cellvit_df)}")
 
         return sample_data
+
+    def load_spot_patches(self, sample_id):
+        """加载当前样本的spot图像patch（位于 hest_data/patches/{sample_id}.h5）"""
+        patch_path = os.path.join(
+            self.hest_data_dir, "patches", f"{sample_id}.h5")
+        if not os.path.exists(patch_path):
+            raise FileNotFoundError(f"spot patch 文件不存在: {patch_path}")
+
+        with h5py.File(patch_path, 'r') as f:
+            if 'img' not in f:
+                raise KeyError(f"spot patch 文件缺少 img 数据集: {patch_path}")
+            images = np.array(f['img'])  # (num_spots, 224, 224, 3)
+
+            coords = np.array(f['coords']) if 'coords' in f else None
+
+            barcodes_ds = f['barcode'] if 'barcode' in f else None
+            if barcodes_ds is not None:
+                # 数据集形如 (N, 1) 的 bytes/object，需要统一为字符串列表
+                barcodes = []
+                for b in barcodes_ds:
+                    if isinstance(b, (bytes, bytearray)):
+                        barcodes.append(b.decode('utf-8'))
+                    elif isinstance(b, np.ndarray) and len(b) > 0:
+                        elem = b[0]
+                        if isinstance(elem, (bytes, bytearray)):
+                            barcodes.append(elem.decode('utf-8'))
+                        else:
+                            barcodes.append(str(elem))
+                    else:
+                        barcodes.append(str(b))
+                barcodes = np.asarray(barcodes)
+            else:
+                barcodes = None
+
+        print(
+            f"  加载spot patches: {images.shape[0]} 个patch, 形状 {images.shape[1:]}, 文件 {patch_path}")
+        if barcodes is not None:
+            print(f"  spot barcodes 数量: {len(barcodes)}")
+        if coords is not None:
+            print(f"  spot coords 形状: {coords.shape}")
+
+        return {
+            'images': images,
+            'coords': coords,
+            'barcodes': barcodes,
+            'path': patch_path
+        }
 
     def extract_cell_patch(self, wsi_image, cell_geometry, patch_size=None):
         """从WSI中提取单个细胞的图像patch"""
@@ -674,7 +724,7 @@ class HESTCellFeatureExtractor:
     def process_sample_with_independent_pca(self, sample_id):
         """处理单个样本，独立训练PCA，提取完直接保存（每例独立PCA版本）"""
         print(f"\n=== 处理空转样本: {sample_id} ===")
-        print("每例独立训练PCA模型，128维DINOv3特征")
+        print("每例独立训练PCA模型，细胞PCA 64维 + spot图像PCA 64维，拼接128维")
 
         # 加载样本数据
         sample_data = self.load_sample_data(sample_id)
@@ -764,27 +814,76 @@ class HESTCellFeatureExtractor:
             print("  无法从WSI中提取真实细胞图像，程序终止")
             raise RuntimeError(f"WSI图像加载失败，无法继续特征提取: {e}") from e
 
-        # 提取DINOv3特征
-        print("提取DINOv3特征...")
+        # 将位置转为数组以便后续分配spot
+        positions = np.asarray(cell_positions, dtype=np.float32) if len(
+            cell_positions) > 0 else np.zeros((len(cell_patches), 2), dtype=np.float32)
+
+        # 分配spot索引（用于spot图像特征拼接）
+        spot_index = None
+        spot_barcodes = None
+        try:
+            spot_index, spot_barcodes = self.assign_spot_indices(
+                sample_id, positions, return_barcodes=True)
+            valid_spots = int(np.sum(spot_index >= 0))
+            print(
+                f"  已为 {valid_spots}/{len(positions)} 个细胞分配有效spot索引")
+        except Exception as e:
+            print(f"[Warn] spot分配失败，后续spot特征将置零: {e}")
+
+        # 提取细胞DINOv3特征
+        print("提取细胞DINOv3特征...")
         dino_features = self.extract_dino_features(cell_patches)
 
-        # 提取完特征后，细胞patch已无用，立即释放以降低内存峰值
-        try:
-            del cell_patches
-        except Exception:
-            pass
-        gc.collect()
+        # 细胞特征PCA降维
+        cell_features, cell_dim_used = self.apply_independent_pca(
+            dino_features, sample_id, target_dim=self.final_dino_dim, name="cell")
 
-        # 为当前样本独立训练PCA降维（不融合形态特征）
-        print(f"为样本 {sample_id} 独立训练PCA降维...")
-        final_features = self.apply_independent_pca(dino_features, sample_id)
+        # 提取spot图像特征并PCA
+        spot_dim_used = 0
+        cell_spot_features = None
 
-        # PCA完成后释放高维DINO特征，进一步降低内存占用
-        try:
-            del dino_features
-        except Exception:
-            pass
-        gc.collect()
+        if spot_index is not None:
+            try:
+                spot_patches = self.load_spot_patches(sample_id)
+                # 转换为list以复用extract_dino_features
+                spot_patch_list = [img for img in spot_patches['images']]
+                spot_raw_features = self.extract_dino_features(
+                    spot_patch_list)
+                spot_features_reduced, spot_dim_used = self.apply_independent_pca(
+                    spot_raw_features, sample_id, target_dim=self.spot_pca_dim, name="spot")
+                cell_spot_features = np.zeros(
+                    (len(cell_patches), spot_dim_used), dtype=np.float32)
+
+                # 建立barcode->spot特征索引映射
+                barcode_to_idx = {}
+                if spot_patches.get('barcodes') is not None:
+                    for idx, bc in enumerate(spot_patches['barcodes']):
+                        barcode_to_idx[bc] = idx
+
+                matched = 0
+                for cell_i, s_idx in enumerate(spot_index):
+                    if s_idx >= 0 and spot_barcodes is not None and s_idx < len(spot_barcodes):
+                        bc = spot_barcodes[s_idx]
+                        patch_idx = barcode_to_idx.get(bc, None)
+                        if patch_idx is not None and patch_idx < spot_features_reduced.shape[0]:
+                            cell_spot_features[cell_i] = spot_features_reduced[patch_idx]
+                            matched += 1
+                print(
+                    f"  已为 {matched}/{len(cell_patches)} 个细胞找到对应spot特征")
+            except Exception as e:
+                print(f"[Warn] spot特征提取或映射失败，使用零向量填充: {e}")
+                spot_dim_used = self.spot_pca_dim
+                cell_spot_features = np.zeros(
+                    (len(cell_patches), spot_dim_used), dtype=np.float32)
+        else:
+            spot_dim_used = self.spot_pca_dim
+            cell_spot_features = np.zeros(
+                (len(cell_patches), spot_dim_used), dtype=np.float32)
+
+        # 拼接细胞与spot特征
+        combined_features = np.concatenate(
+            [cell_features.astype(np.float32), cell_spot_features], axis=1)
+        actual_feature_dim = cell_dim_used + spot_dim_used
 
         # 准备元数据
         # 尝试估算归一化WSI对应原始WSI的等效level（若路径存在原始WSI且可读）
@@ -809,39 +908,34 @@ class HESTCellFeatureExtractor:
 
         metadata = {
             'sample_id': sample_id,
-            'num_cells': num_cells,
-            'feature_dim': self.final_feature_dim,
-            'dino_dim': self.final_dino_dim,
+            'num_cells': len(cell_patches),
+            'feature_dim': actual_feature_dim,
+            'dino_dim': cell_dim_used,
+            'spot_dim': spot_dim_used,
             'patch_size': self.cell_patch_size,
             'wsi_level': int(level),  # 实际使用的级别（普通TIFF回退时为0）
             'normalized_equiv_raw_level': normalized_equiv_level,
-            'total_cells_processed': num_cells,
+            'total_cells_processed': len(cell_patches),
             'independent_pca': True,
             'pca_trained_on_sample': sample_id
         }
 
         # 保存特征
         # 位置与索引
-        positions = np.asarray(cell_positions, dtype=np.float32) if len(
-            cell_positions) > 0 else np.zeros((num_cells, 2), dtype=np.float32)
         cell_index = np.arange(positions.shape[0], dtype=np.int64)
-        spot_index = None
-        if self.assign_spot:
-            try:
-                spot_index = self.assign_spot_indices(sample_id, positions)
-            except Exception as e:
-                print(f"[Warn] spot assignment failed for {sample_id}: {e}")
+        spot_index_to_save = spot_index if self.assign_spot else None
 
         output_file = self.save_features(
-            sample_id, final_features, metadata, positions=positions, cell_index=cell_index, spot_index=spot_index)
+            sample_id, combined_features, metadata, positions=positions, cell_index=cell_index, spot_index=spot_index_to_save)
 
         print(f"\n=== 性能统计 ===")
-        total_cells = num_cells
+        total_cells = len(cell_patches)
         print(f"✓ 总处理细胞数: {total_cells:,}")
         print(f"✓ DINOv3批处理大小: {self.dino_batch_size}")
         print(f"✓ 细胞批处理大小: {self.cell_batch_size}")
         print(f"✓ 并行工作者数: {self.num_workers}")
-        print(f"✓ 最终特征维度: {self.final_feature_dim} (样本独立PCA)")
+        print(
+            f"✓ 最终特征维度: {actual_feature_dim} (cell {cell_dim_used} + spot {spot_dim_used})")
         print(f"✓ 特征文件: {output_file}")
         if torch.cuda.is_available():
             print(
@@ -849,11 +943,10 @@ class HESTCellFeatureExtractor:
 
         return {
             'sample_id': sample_id,
-            'num_cells': num_cells,
-            'final_feature_dim': self.final_feature_dim,
+            'num_cells': len(cell_patches),
+            'final_feature_dim': actual_feature_dim,
             'output_file': output_file
         }
-
 
     def _extract_patches_parallel(self, cellvit_batch, wsi, level, start_idx):
         """使用多线程并行提取细胞patches以最大化CPU利用率"""
@@ -972,10 +1065,11 @@ class HESTCellFeatureExtractor:
             # 返回纯黑色patch作为默认值
             return np.zeros((patch_size, patch_size, 3), dtype=np.uint8), (0.0, 0.0)
 
-    def assign_spot_indices(self, sample_id, positions: np.ndarray):
+    def assign_spot_indices(self, sample_id, positions: np.ndarray, return_barcodes: bool = False):
         """基于HEST的AnnData obsm['spatial']按最近邻且半径限制分配spot_index。
         逻辑与 scripts/augment_features_with_positions.py 保持一致。
         返回 ndarray[int64]，长度=N（细胞数），不可分配位置为-1。
+        若 return_barcodes=True，则同时返回对应 obs_names/barcodes。
         """
         import scanpy as sc
         st_file = os.path.join(self.hest_data_dir, "st", f"{sample_id}.h5ad")
@@ -1022,84 +1116,77 @@ class HESTCellFeatureExtractor:
             nearest_dist_um = nearest_dist_px * float(pixel_size_um)
             within = nearest_dist_um <= float(spot_radius_um)
             spot_index[start:end][within] = nearest[within].astype(np.int64)
+        if return_barcodes:
+            obs_names = np.asarray(adata.obs_names)
+            return spot_index, obs_names
         return spot_index
 
-    def apply_independent_pca(self, dino_features, sample_id):
-        """为当前样本独立训练PCA降维（每例独立PCA版本）"""
-        print(f"为样本 {sample_id} 独立训练PCA降维器...")
+    def apply_independent_pca(self, features, sample_id, target_dim=None, name="cell"):
+        """为当前样本独立训练PCA降维（可指定目标维度与名称）"""
+        if target_dim is None:
+            target_dim = self.final_dino_dim
+
+        print(f"为样本 {sample_id} 独立训练{name} PCA降维器 (目标维度={target_dim})...")
 
         # 检查并清理NaN值
         print(f"  检查数据质量...")
-        nan_count = np.isnan(dino_features).sum()
-        inf_count = np.isinf(dino_features).sum()
+        nan_count = np.isnan(features).sum()
+        inf_count = np.isinf(features).sum()
 
         if nan_count > 0:
             print(f"  警告: 发现 {nan_count} 个NaN值，将被替换为0")
-            dino_features = np.nan_to_num(dino_features, nan=0.0)
+            features = np.nan_to_num(features, nan=0.0)
 
         if inf_count > 0:
             print(f"  警告: 发现 {inf_count} 个Inf值，将被替换为有限值")
-            dino_features = np.nan_to_num(
-                dino_features, posinf=1.0, neginf=-1.0)
+            features = np.nan_to_num(
+                features, posinf=1.0, neginf=-1.0)
 
         # 检查是否还有有效的特征
-        if np.all(dino_features == 0):
+        if np.all(features == 0):
             print(f"  错误: 所有特征都为0，无法进行PCA")
-            raise ValueError(f"样本 {sample_id} 的所有DINOv3特征都为0，可能是特征提取失败")
+            raise ValueError(f"样本 {sample_id} 的所有{name}特征都为0，可能是特征提取失败")
 
         # 动态调整PCA维度，不能超过样本数
-        n_samples = dino_features.shape[0]
-        n_features = dino_features.shape[1]
+        n_samples = features.shape[0]
+        n_features = features.shape[1]
         max_components = min(n_samples, n_features)
 
-        actual_dino_dim = min(self.final_dino_dim, max_components - 1)
+        actual_dim = min(target_dim, max_components)
 
-        if actual_dino_dim < self.final_dino_dim:
+        if actual_dim < target_dim:
             print(
-                f"  警告: PCA维度从 {self.final_dino_dim} 调整为 {actual_dino_dim} (样本数限制)")
+                f"  警告: {name} PCA维度从 {target_dim} 调整为 {actual_dim} (样本数限制)")
 
-        if actual_dino_dim <= 0:
+        if actual_dim <= 0:
             print(f"  错误: 无法确定有效的PCA维度")
             raise ValueError(
-                f"样本 {sample_id} 无法确定有效的PCA维度，样本数={n_samples}, 特征数={n_features}")
+                f"样本 {sample_id} 无法确定有效的{name} PCA维度，样本数={n_samples}, 特征数={n_features}")
 
         # 为当前样本独立训练PCA
         from sklearn.decomposition import PCA
         try:
-            sample_pca = PCA(n_components=actual_dino_dim, random_state=42)
-            reduced_features = sample_pca.fit_transform(dino_features)
+            sample_pca = PCA(n_components=actual_dim, random_state=42)
+            reduced_features = sample_pca.fit_transform(features)
         except Exception as e:
             print(f"  PCA训练失败: {e}")
             print(
-                f"  特征统计: min={dino_features.min():.6f}, max={dino_features.max():.6f}, mean={dino_features.mean():.6f}, std={dino_features.std():.6f}")
-            raise ValueError(f"样本 {sample_id} PCA训练失败: {e}") from e
+                f"  特征统计: min={features.min():.6f}, max={features.max():.6f}, mean={features.mean():.6f}, std={features.std():.6f}")
+            raise ValueError(f"样本 {sample_id} {name} PCA训练失败: {e}") from e
 
-        # 保存当前样本的PCA模型（使用原子性写入）
+        # 保存当前样本的PCA模型
         sample_pca_path = os.path.join(
-            self.output_dir, f"{sample_id}_dino_pca_model.pkl")
-        temp_pca_path = sample_pca_path + ".tmp"
-        
-        try:
-            with open(temp_pca_path, 'wb') as f:
-                pickle.dump(sample_pca, f)
-            # 原子性重命名
-            os.replace(temp_pca_path, sample_pca_path)
-        except Exception as e:
-            # 如果保存失败，清理临时文件
-            if os.path.exists(temp_pca_path):
-                try:
-                    os.remove(temp_pca_path)
-                except:
-                    pass
-            raise RuntimeError(f"保存PCA模型失败: {e}") from e
+            self.output_dir, f"{sample_id}_{name}_pca_model.pkl")
+        with open(sample_pca_path, 'wb') as f:
+            pickle.dump(sample_pca, f)
 
         # 计算方差解释比例
         explained_variance = sample_pca.explained_variance_ratio_.sum()
         explained_variance_each = sample_pca.explained_variance_ratio_
 
         print(f"样本 {sample_id} PCA训练完成:")
-        print(f"  - 输入维度: {dino_features.shape[1]}")
-        print(f"  - 输出维度: {actual_dino_dim}")
+        print(f"  - 输入维度: {features.shape[1]}")
+        print(f"  - 输出维度: {actual_dim}")
         print(
             f"  - 总解释方差比例: {explained_variance:.4f} ({explained_variance*100:.2f}%)")
 
@@ -1112,7 +1199,7 @@ class HESTCellFeatureExtractor:
         # 显示累积解释比例
         cumulative_variance = np.cumsum(explained_variance_each)
         print(f"  - 累积解释比例:")
-        milestones = [10, 20, 50, 100, 128]
+        milestones = [10, 20, 50, 64, 100, 128]
         for milestone in milestones:
             if milestone <= len(cumulative_variance):
                 print(
@@ -1120,18 +1207,14 @@ class HESTCellFeatureExtractor:
 
         print(f"  - PCA模型保存: {sample_pca_path}")
 
-        return reduced_features
+        return reduced_features, actual_dim
 
     def save_features(self, sample_id, combined_features, metadata, positions=None, cell_index=None, spot_index=None):
         """保存提取的特征，兼容 augment_features_with_positions.py 的输出格式。
         始终写入 features 和 metadata；若提供 positions/cell_index/spot_index 则一并写入。
-        使用原子性写入（临时文件+重命名）保证文件完整性。
-        注意：为减少内存峰值，这里不使用压缩版本（np.savez_compressed），
-        而是使用np.savez直接写入，牺牲部分磁盘空间换取更稳定的内存占用。
         """
         output_file = os.path.join(
             self.output_dir, f"{sample_id}_combined_features.npz")
-        temp_file = output_file + ".tmp"
 
         # 组装保存字典
         save_dict = {
@@ -1145,20 +1228,7 @@ class HESTCellFeatureExtractor:
         if spot_index is not None:
             save_dict['spot_index'] = spot_index
 
-        # 先写入临时文件，确保原子性
-        try:
-            # 使用非压缩np.savez以避免在大数组上产生过高的内存峰值
-            np.savez(temp_file, **save_dict)
-            # 原子性重命名（完成后才替换原文件）
-            os.replace(temp_file, output_file)
-        except Exception as e:
-            # 如果保存失败，清理临时文件
-            if os.path.exists(temp_file):
-                try:
-                    os.remove(temp_file)
-                except:
-                    pass
-            raise RuntimeError(f"保存特征文件失败: {e}") from e
+        np.savez_compressed(output_file, **save_dict)
 
         msg_extra = []
         if 'positions' in save_dict:
@@ -1237,171 +1307,15 @@ def save_progress(output_dir, progress):
         print(f"⚠️  保存进度失败: {e}")
 
 
-def verify_sample_file_integrity(output_dir, sample_id, expected_num_cells=None):
-    """验证样本文件的完整性
-    
-    Args:
-        output_dir: 输出目录
-        sample_id: 样本ID
-        expected_num_cells: 期望的细胞数量（如果提供，将进行数量验证）
-    
-    Returns:
-        tuple: (is_complete: bool, num_cells_in_file: int, error_msg: str)
-    """
+def is_sample_completed(output_dir, sample_id):
+    """检查样本是否已完成处理"""
     output_file = os.path.join(
         output_dir, f"{sample_id}_combined_features.npz")
-    pca_file = os.path.join(output_dir, f"{sample_id}_dino_pca_model.pkl")
-    
-    # 检查文件是否存在
-    if not os.path.exists(output_file):
-        return False, 0, "特征文件不存在"
-    if not os.path.exists(pca_file):
-        return False, 0, "PCA模型文件不存在"
-    
-    # 检查是否有临时文件残留（说明上次保存未完成）
-    temp_file = output_file + ".tmp"
-    if os.path.exists(temp_file):
-        return False, 0, "检测到临时文件残留，上次保存可能未完成"
-    
-    # 验证npz文件完整性
-    try:
-        with np.load(output_file) as data:
-            # 检查必需的字段是否存在
-            if 'features' not in data:
-                return False, 0, "缺少 'features' 字段"
-            if 'metadata' not in data:
-                return False, 0, "缺少 'metadata' 字段"
-            
-            # 检查特征数组是否有效
-            features = data['features']
-            if features.size == 0:
-                return False, 0, "特征数组为空"
-            
-            num_cells_in_file = features.shape[0]
-            
-            # 验证特征维度
-            if len(features.shape) != 2:
-                return False, num_cells_in_file, f"特征数组维度错误: {features.shape}"
-            
-            # 检查metadata中的细胞数量是否一致
-            try:
-                metadata = data['metadata']
-                # npz文件中的metadata可能是numpy数组，需要转换为dict
-                if hasattr(metadata, 'item'):
-                    metadata = metadata.item()
-                elif isinstance(metadata, np.ndarray):
-                    # 如果是0维数组，提取标量
-                    if metadata.ndim == 0:
-                        metadata = metadata.item()
-                    # 如果是1维数组且长度为1，提取元素
-                    elif metadata.ndim == 1 and len(metadata) == 1:
-                        metadata = metadata[0]
-                
-                if isinstance(metadata, dict):
-                    metadata_num_cells = metadata.get('num_cells', None)
-                    if metadata_num_cells is not None and metadata_num_cells != num_cells_in_file:
-                        return False, num_cells_in_file, f"metadata中的细胞数量({metadata_num_cells})与特征数量({num_cells_in_file})不一致"
-            except Exception as e:
-                # metadata解析失败不影响主要验证，只记录警告
-                pass
-            
-            # 如果提供了期望数量，进行验证
-            if expected_num_cells is not None:
-                if num_cells_in_file != expected_num_cells:
-                    return False, num_cells_in_file, f"文件中的细胞数量({num_cells_in_file})与期望数量({expected_num_cells})不一致"
-            
-            # 验证其他字段的一致性
-            if 'positions' in data:
-                positions = data['positions']
-                if positions.shape[0] != num_cells_in_file:
-                    return False, num_cells_in_file, f"positions数量({positions.shape[0]})与特征数量({num_cells_in_file})不一致"
-            
-            if 'cell_index' in data:
-                cell_index = data['cell_index']
-                if len(cell_index) != num_cells_in_file:
-                    return False, num_cells_in_file, f"cell_index数量({len(cell_index)})与特征数量({num_cells_in_file})不一致"
-            
-            if 'spot_index' in data:
-                spot_index = data['spot_index']
-                if len(spot_index) != num_cells_in_file:
-                    return False, num_cells_in_file, f"spot_index数量({len(spot_index)})与特征数量({num_cells_in_file})不一致"
-            
-            # 检查是否有NaN或Inf值
-            if np.isnan(features).any() or np.isinf(features).any():
-                return False, num_cells_in_file, "特征中包含NaN或Inf值"
-            
-        return True, num_cells_in_file, "文件完整"
-        
-    except Exception as e:
-        return False, 0, f"文件损坏或无法读取: {str(e)}"
-
-
-def get_expected_num_cells(hest_data_dir, sample_id):
-    """获取样本的期望细胞数量（从cellvit_seg文件）
-    
-    Args:
-        hest_data_dir: HEST数据目录
-        sample_id: 样本ID
-    
-    Returns:
-        int: 期望的细胞数量，如果无法获取则返回None
-    """
-    try:
-        cellvit_path = os.path.join(
-            hest_data_dir, "cellvit_seg", f"{sample_id}_cellvit_seg.parquet")
-        if os.path.exists(cellvit_path):
-            cellvit_df = pd.read_parquet(cellvit_path)
-            return len(cellvit_df)
-    except Exception as e:
-        print(f"⚠️  无法获取样本 {sample_id} 的期望细胞数量: {e}")
-    return None
-
-
-def is_sample_completed(output_dir, sample_id, expected_num_cells=None):
-    """检查样本是否已完成处理（包含完整性验证）
-    
-    Args:
-        output_dir: 输出目录
-        sample_id: 样本ID
-        expected_num_cells: 期望的细胞数量（可选，用于验证）
-    
-    Returns:
-        bool: 如果文件完整则返回True，否则返回False
-    """
-    is_complete, num_cells, error_msg = verify_sample_file_integrity(
-        output_dir, sample_id, expected_num_cells)
-    
-    if not is_complete:
-        print(f"⚠️  样本 {sample_id} 文件不完整: {error_msg}")
-        if num_cells > 0:
-            print(f"   当前文件包含 {num_cells} 个细胞")
-    
-    return is_complete
-
-
-def remove_incomplete_files(output_dir, sample_id):
-    """删除不完整的文件（特征文件和PCA模型文件）
-    
-    Args:
-        output_dir: 输出目录
-        sample_id: 样本ID
-    """
-    output_file = os.path.join(
-        output_dir, f"{sample_id}_combined_features.npz")
-    pca_file = os.path.join(output_dir, f"{sample_id}_dino_pca_model.pkl")
-    temp_file = output_file + ".tmp"
-    
-    removed_files = []
-    for file_path in [output_file, pca_file, temp_file]:
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                removed_files.append(os.path.basename(file_path))
-            except Exception as e:
-                print(f"⚠️  删除文件失败 {file_path}: {e}")
-    
-    if removed_files:
-        print(f"🗑️  已删除不完整文件: {', '.join(removed_files)}")
+    cell_pca_file = os.path.join(
+        output_dir, f"{sample_id}_cell_pca_model.pkl")
+    spot_pca_file = os.path.join(
+        output_dir, f"{sample_id}_spot_pca_model.pkl")
+    return os.path.exists(output_file) and os.path.exists(cell_pca_file) and os.path.exists(spot_pca_file)
 
 
 def main_independent_pca_extraction(target_samples=None):
@@ -1415,7 +1329,7 @@ def main_independent_pca_extraction(target_samples=None):
 
     # 配置参数
     hest_data_dir = "/data/yujk/hovernet2feature/HEST/hest_data"
-    output_dir = "/data/yujk/hovernet2feature/hest_dinov3_other_cancer"
+    output_dir = "/data/yujk/hovernet2feature/hest_dinov3_concatfeature_COAD"
 
     # 确保输出目录存在
     os.makedirs(output_dir, exist_ok=True)
@@ -1452,31 +1366,11 @@ def main_independent_pca_extraction(target_samples=None):
     completed_samples = set(progress.get('completed_samples', []))
     failed_samples = set(progress.get('failed_samples', []))
 
-    # 检查文件系统中已完成的样本（带完整性验证）
-    print(f"\n=== 验证已存在文件的完整性 ===")
+    # 检查文件系统中已完成的样本
     file_completed_samples = set()
-    incomplete_samples = []
-    
     for sample_id in candidate_samples:
-        # 获取期望的细胞数量
-        expected_num_cells = get_expected_num_cells(hest_data_dir, sample_id)
-        
-        # 验证文件完整性
-        if is_sample_completed(output_dir, sample_id, expected_num_cells):
+        if is_sample_completed(output_dir, sample_id):
             file_completed_samples.add(sample_id)
-        else:
-            # 检查文件是否存在（即使不完整）
-            output_file = os.path.join(
-                output_dir, f"{sample_id}_combined_features.npz")
-            if os.path.exists(output_file):
-                incomplete_samples.append(sample_id)
-    
-    # 自动修复不完整的文件
-    if incomplete_samples:
-        print(f"\n⚠️  发现 {len(incomplete_samples)} 个不完整的文件，将自动删除并重新处理:")
-        for sample_id in incomplete_samples:
-            print(f"  - {sample_id}")
-            remove_incomplete_files(output_dir, sample_id)
 
     # 合并进度信息
     all_completed = completed_samples.union(file_completed_samples)
@@ -1519,7 +1413,7 @@ def main_independent_pca_extraction(target_samples=None):
     print("=== HEST空转数据独立PCA特征提取（DINOv3）- 断点续传版 ===")
     print(f"数据目录: {hest_data_dir}")
     print(f"输出目录: {output_dir}")
-    print(f"特征配置: 仅DINOv3，每例独立PCA至128维")
+    print(f"特征配置: DINOv3 -> 细胞PCA 64维 + spot图像PCA 64维，拼接128维（每例独立PCA）")
     print(f"使用级别1分辨率WSI (~0.5μm/pixel)")
     print(f"48×48像素patches，覆盖24×24μm物理区域")
 
@@ -1594,10 +1488,9 @@ def main_independent_pca_extraction(target_samples=None):
             print(f"正在处理空转样本: {sample_id}")
             print(f"{'='*50}")
 
-            # 检查样本是否已完成（带完整性验证）
-            expected_num_cells = get_expected_num_cells(hest_data_dir, sample_id)
-            if is_sample_completed(output_dir, sample_id, expected_num_cells):
-                print(f"✅ 样本 {sample_id} 已完成且文件完整，跳过")
+            # 检查样本是否已完成
+            if is_sample_completed(output_dir, sample_id):
+                print(f"✅ 样本 {sample_id} 已完成，跳过")
                 # 添加到结果中以便统计
                 try:
                     output_file = os.path.join(
@@ -1613,11 +1506,7 @@ def main_independent_pca_extraction(target_samples=None):
                     })
                 except Exception as e:
                     print(f"⚠️  读取已完成样本 {sample_id} 信息失败: {e}")
-                    # 如果读取失败，可能是文件损坏，删除并重新处理
-                    print(f"   将删除损坏的文件并重新处理")
-                    remove_incomplete_files(output_dir, sample_id)
-                else:
-                    continue
+                continue
 
             # 异常处理：如果某个样本处理失败，记录并继续处理下一个
             try:
@@ -1768,10 +1657,10 @@ def main_independent_pca_extraction(target_samples=None):
 
 
 if __name__ == "__main__":
-    # 运行空转数据独立PCA特征提取（仅DINOv3特征）
+    # 运行空转数据独立PCA特征提取（DINOv3细胞+spot图像特征）
     print("HEST细胞特征提取器 - 仅使用DINOv3特征（独立PCA）")
-    print("特征配置: DINOv3 768维 -> PCA降维至128维")
-    print("不包含形态特征，每个样本独立训练PCA")
+    print("特征配置: DINOv3 -> 细胞PCA 64维 + spot图像PCA 64维，拼接后128维")
+    print("每个样本独立训练PCA（细胞与spot各自独立）")
     print()
     
     # ============================================================
@@ -1790,23 +1679,10 @@ if __name__ == "__main__":
     target_samples = None
     
     # 方式2: 指定要处理的样本列表（取消下面的注释并修改样本ID）
-    target_samples = [
-        "INT1","INT10","INT11","INT12","INT13","INT14","INT15","INT16","INT17","INT18",
-        "INT19","INT2","INT20","INT21","INT22","INT23","INT24","INT3","INT4","INT5",
-        "INT6","INT7","INT8","INT9",
-        "TENX111","TENX147","TENX148","TENX149",
-        "NCBI642","NCBI643",
-        "NCBI783","NCBI785","TENX95","TENX99",
-        "TENX118","TENX141",
-        "NCBI681","NCBI682","NCBI683","NCBI684",
-        "TENX116","TENX126","TENX140",
-        "MEND139","MEND140","MEND141","MEND142","MEND143","MEND144","MEND145","MEND146",
-        "MEND147","MEND148","MEND149","MEND150","MEND151","MEND152","MEND153","MEND154",
-        "MEND156","MEND157","MEND158","MEND159","MEND160","MEND161","MEND162",
-        "ZEN36","ZEN40","ZEN48","ZEN49",
-        "TENX115","TENX117"
-    ]  # 替换为实际的样本ID
-    
+    # target_samples = ['SPA154', 'SPA153', 'SPA152', 'SPA151', 'SPA150', 'SPA149','SPA148', 'SPA147', 'SPA146', 'SPA145', 'SPA144', 'SPA143','SPA142', 'SPA141', 'SPA140', 'SPA139', 'SPA138', 'SPA137','SPA136', 'SPA135', 'SPA134', 'SPA133', 'SPA132', 'SPA131', 'SPA130', 'SPA129', 'SPA128', 'SPA127', 'SPA126', 'SPA125','SPA124', 'SPA123', 'SPA122', 'SPA121', 'SPA120', 'SPA119']
+     # 替换为实际的样本ID
+    # target_samples = ['NCBI770', 'NCBI769', 'NCBI768', 'NCBI767', 'NCBI766', 'NCBI765','NCBI764', 'NCBI763', 'NCBI762', 'NCBI761', 'NCBI760', 'NCBI759']
+    target_samples = ['TENX152','TENX92', 'TENX91', 'TENX90', 'TENX89', 'TENX49','TENX29', 'ZEN47', 'ZEN46', 'ZEN45', 'ZEN44','ZEN43', 'ZEN42', 'ZEN39', 'ZEN38']
     try:
         main_independent_pca_extraction(target_samples=target_samples)
     except KeyboardInterrupt:

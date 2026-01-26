@@ -38,11 +38,11 @@ def get_fold_samples(fold_idx, all_samples=None):
     #     8: ['TENX29', 'ZEN47', 'ZEN46', 'ZEN45', 'ZEN44'],
     #     9: ['ZEN43', 'ZEN42', 'ZEN39', 'ZEN38']
     # }
-    fold_splits = {
-        0: ['TENX152','TENX92', 'TENX91', 'TENX90', 'TENX89', 'TENX49'],
-        1: ['TENX29', 'ZEN47', 'ZEN46', 'ZEN45', 'ZEN44'],
-        2: ['ZEN43', 'ZEN42', 'ZEN39', 'ZEN38']
-    }
+    # fold_splits = {
+    #     0: ['TENX152','TENX92', 'TENX91', 'TENX90', 'TENX89', 'TENX49'],
+    #     1: ['TENX29', 'ZEN47', 'ZEN46', 'ZEN45', 'ZEN44'],
+    #     2: ['ZEN43', 'ZEN42', 'ZEN39', 'ZEN38']
+    # }
     # fold_splits = {
     #     0:['SPA154', 'SPA153', 'SPA152', 'SPA151', 'SPA150', 'SPA149'],
     #     1:['SPA148', 'SPA147', 'SPA146', 'SPA145', 'SPA144', 'SPA143'],
@@ -54,8 +54,27 @@ def get_fold_samples(fold_idx, all_samples=None):
     # fold_splits = {
     #     0:['NCBI770', 'NCBI769', 'NCBI768', 'NCBI767', 'NCBI766', 'NCBI765',
     #    'NCBI764', 'NCBI763', 'NCBI762', 'NCBI761', 'NCBI760', 'NCBI759'],
-    # }
 
+    # }
+    fold_splits = {
+        0: ['TENX118','TENX141'], # LUNG
+    }
+    # fold_splits = {
+    #     0: ['NCBI642', 'NCBI643'], # HCC
+    # }
+    # fold_splits = {
+    #     0: ['TENX116', 'TENX126','TENX140'], # PAAD
+    # }
+    # fold_splits = {
+    #     0: ['MEND139', 'MEND140', 'MEND141', 'MEND142', 'MEND143', 'MEND144', 'MEND145', 'MEND146', 'MEND147', 'MEND148', 'MEND149', 'MEND150',
+    #     'MEND151', 'MEND152', 'MEND153', 'MEND154', 'MEND155', 'MEND156', 'MEND157', 'MEND158', 'MEND159', 'MEND160','MEND161','MEND162'],#PRAD
+    # }
+    # fold_splits = {
+    #     0: ['NCBI783', 'NCBI785','TENX95','TENX99'], # IDC
+    # }
+    # fold_splits = {
+    #     0: ['ZEN36', 'ZEN40','ZEN48','ZEN49'], # READ
+    # }
     test_samples = fold_splits[fold_idx]
     train_samples = []
     for fold, samples in fold_splits.items():
@@ -133,6 +152,25 @@ def evaluate_model_metrics(model, data_loader, device):
 
             all_predictions.append(predictions_np)
             all_targets.append(targets_np)
+
+    # Check if we have any predictions
+    if not all_predictions:
+        print("Warning: No evaluation samples found, returning zero metrics")
+        return {
+            'overall_mse': 0.0,
+            'overall_correlation': 0.0,
+            'overall_correlation_pval': 1.0,
+            'mean_gene_correlation': 0.0,
+            'median_gene_correlation': 0.0,
+            'std_gene_correlation': 0.0,
+            'mean_spot_correlation': 0.0,
+            'median_spot_correlation': 0.0,
+            'std_spot_correlation': 0.0,
+            'gene_correlations': [],
+            'spot_correlations': [],
+            'gene_mses': [],
+            'spot_mses': []
+        }
 
     # Merge all batch results
     all_predictions = np.vstack(all_predictions)  # [n_spots, n_genes]
@@ -243,10 +281,13 @@ def save_evaluation_results(results, predictions, targets, fold_idx, save_dir=".
         f.write(
             f"Median Spot Correlation: {results['median_spot_correlation']:.6f}\n")
 
-    # Save predictions and targets
-    np.save(os.path.join(
-        save_dir, f"fold_{fold_idx}_predictions.npy"), predictions)
-    np.save(os.path.join(save_dir, f"fold_{fold_idx}_targets.npy"), targets)
+    # Save predictions and targets (skip if None)
+    if predictions is not None and targets is not None:
+        np.save(os.path.join(
+            save_dir, f"fold_{fold_idx}_predictions.npy"), predictions)
+        np.save(os.path.join(save_dir, f"fold_{fold_idx}_targets.npy"), targets)
+    else:
+        print(f"Warning: Skipping save of predictions/targets for fold {fold_idx} (empty data)")
 
     print(f"Results saved to {save_dir}")
 

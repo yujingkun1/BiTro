@@ -732,18 +732,31 @@ def main():
 
     # 配置参数
     hest_data_dir = "/data/yujk/hovernet2feature/HEST/hest_data"
-    output_dir = "/data/yujk/hovernet2feature/hest_graphs_dinov3_cscc"
+    output_dir = "/data/yujk/hovernet2feature/hest_graphs_dinov3_other_cancer"
 
     # 深度特征目录（新增）
-    features_dir = "//data/yujk/hovernet2feature/hest_dinov3_cscc"
+    features_dir = "/data/yujk/hovernet2feature/hest_dinov3_other_cancer"
 
     # 是否使用指定样本列表：
     # - None: 按默认逻辑选择样本（保持原有行为）
     # - True: 使用下面的 SPECIFIED_SAMPLE_IDS 进行处理
     USE_SPECIFIED_SAMPLES = True
-    SPECIFIED_SAMPLE_IDS = ['NCBI770', 'NCBI769', 'NCBI768', 'NCBI767', 'NCBI766', 'NCBI765',
-       'NCBI764', 'NCBI763', 'NCBI762', 'NCBI761', 'NCBI760', 'NCBI759']
-
+    SPECIFIED_SAMPLE_IDS = [
+        "INT1","INT10","INT11","INT12","INT13","INT14","INT15","INT16","INT17","INT18",
+        "INT19","INT2","INT20","INT21","INT22","INT23","INT24","INT3","INT4","INT5",
+        "INT6","INT7","INT8","INT9",
+        "TENX111","TENX147","TENX148","TENX149",
+        "NCBI642","NCBI643",
+        "NCBI783","NCBI785","TENX95","TENX99",
+        "TENX118","TENX141",
+        "NCBI681","NCBI682","NCBI683","NCBI684",
+        "TENX116","TENX126","TENX140",
+        "MEND139","MEND140","MEND141","MEND142","MEND143","MEND144","MEND145","MEND146",
+        "MEND147","MEND148","MEND149","MEND150","MEND151","MEND152","MEND153","MEND154",
+        "MEND156","MEND157","MEND158","MEND159","MEND160","MEND161","MEND162",
+        "ZEN36","ZEN40","ZEN48","ZEN49",
+        "TENX115","TENX117"
+    ]
     # 设置使用的样本范围
     USE_ALL_SAMPLES = True  # 使用所有样本
     MAX_SAMPLES = None  # 不限制样本数（修改：确保使用全部数据集）

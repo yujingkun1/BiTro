@@ -416,7 +416,7 @@ class BulkStaticGraphBuilder:
             features_dir = self.train_features_dir
         else:
             features_dir = self.test_features_dir
-        
+
         # 找到所有parquet文件
         feature_files = []
         for root, _, files in os.walk(features_dir):
@@ -424,7 +424,7 @@ class BulkStaticGraphBuilder:
                 if file.endswith(".parquet"):
                     full_path = os.path.join(root, file)
                     feature_files.append(full_path)
-        
+
         feature_files = sorted(feature_files)
         limit = self.max_train_slides if split == 'train' else self.max_test_slides
         if limit is not None:
@@ -433,11 +433,23 @@ class BulkStaticGraphBuilder:
             print(f"找到 {original_count} 个{split}集特征文件，选取前 {len(feature_files)} 个进行构建")
         else:
             print(f"找到 {len(feature_files)} 个{split}集特征文件（全部使用）")
-        
+
         # 记录被选取的特征文件名
         self.selected_feature_files[split] = [os.path.basename(p) for p in feature_files]
-        
+
         return feature_files
+
+    def get_checkpoint_file_list(self, split='train'):
+        """获取检查点文件列表（仅返回文件名，不加载数据）"""
+        if not self.checkpoint_dir:
+            return []
+
+        checkpoint_dir = os.path.join(self.checkpoint_dir, split)
+        if not os.path.exists(checkpoint_dir):
+            return []
+
+        checkpoint_files = [f for f in os.listdir(checkpoint_dir) if f.endswith('.pkl')]
+        return checkpoint_files
     
     def save_slide_checkpoint(self, slide_id, slide_data, split='train'):
         """保存单个切片的检查点"""
@@ -510,13 +522,18 @@ class BulkStaticGraphBuilder:
         """使用新逻辑处理所有切片数据：按切片级别匹配patch，逐个加载和处理切片以减少内存占用，支持断点续传"""
         print("=== 使用切片级别匹配逻辑处理所有数据（逐个切片处理，支持断点续传）===")
         
-        # 如果启用了检查点，先加载已处理的数据
+        # 如果启用了检查点，初始化已处理的数据记录（不预加载，节省内存）
         if self.checkpoint_dir:
-            print("\n=== 加载已保存的检查点 ===")
-            self.processed_data['train'] = self.load_all_checkpoints('train')
-            self.processed_data['test'] = self.load_all_checkpoints('test')
-            print(f"  已加载训练集切片: {len(self.processed_data['train'])}")
-            print(f"  已加载测试集切片: {len(self.processed_data['test'])}")
+            print("\n=== 初始化检查点状态（按需加载，节省内存）===")
+            # 只记录已处理的切片ID，不预加载数据
+            self.processed_data['train'] = {}
+            self.processed_data['test'] = {}
+
+            # 统计已处理的切片数量
+            train_checkpoints = self.get_checkpoint_file_list('train')
+            test_checkpoints = self.get_checkpoint_file_list('test')
+            print(f"  发现训练集已处理切片: {len(train_checkpoints)}")
+            print(f"  发现测试集已处理切片: {len(test_checkpoints)}")
         
         # 获取特征文件列表（不加载数据）
         train_feature_files = self.get_feature_file_list('train')
@@ -793,99 +810,110 @@ class BulkStaticGraphBuilder:
             print(f"  - {split}集文件列表: {txt_path} (共 {len(filenames)} 个)")
     
     def save_graphs_slide_logic(self, output_dir):
-        """保存构建的图数据 - 切片逻辑：保存完整的细胞特征数据和切片映射"""
-        print("=== 保存图结构和完整细胞数据（切片级别）===")
-        
+        """保存构建的图数据 - 切片逻辑：从检查点文件加载并保存，节省内存"""
+        print("=== 保存图结构和完整细胞数据（切片级别，从检查点加载）===")
+
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
-        
+
         # 分别保存训练集和测试集的图数据
         for split in ['train', 'test']:
-            if split not in self.processed_data:
+            # 获取所有检查点文件列表
+            checkpoint_files = self.get_checkpoint_file_list(split)
+            if not checkpoint_files:
+                print(f"{split}集没有找到检查点文件，跳过")
                 continue
-                
-            split_data = self.processed_data[split]
-            
-            # 准备保存的数据
+
+            print(f"{split}集发现 {len(checkpoint_files)} 个检查点文件，开始分批加载并保存")
+
+            # 分批处理，避免内存溢出（每批处理5个文件）
+            batch_size = 5
+            total_batches = (len(checkpoint_files) + batch_size - 1) // batch_size
+
+            # 准备保存的数据（分批累积）
             intra_graphs = {}
             inter_graphs = {}
             bulk_expressions = {}
-            all_cell_features = {}       # 所有细胞的DINO特征
-            all_cell_positions = {}      # 所有细胞的空间坐标  
-            cluster_labels = {}          # 所有细胞的聚类标签
-            graph_status = {}            # 每个切片是否有图数据的状态
-            cell_to_graph_mappings = {}  # 细胞到图的映射关系
-            slide_to_patient_mapping = {} # 切片到患者的映射关系
+            all_cell_features = {}
+            all_cell_positions = {}
+            cluster_labels = {}
+            graph_status = {}
+            cell_to_graph_mappings = {}
+            slide_to_patient_mapping = {}
             metadata = {}
+
+            checkpoint_dir = os.path.join(self.checkpoint_dir, split)
+
+            for batch_idx in range(total_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min((batch_idx + 1) * batch_size, len(checkpoint_files))
+                batch_files = checkpoint_files[start_idx:end_idx]
+
+                print(f"  处理{split}集第 {batch_idx + 1}/{total_batches} 批 ({len(batch_files)} 个文件)...")
+
+                # 分批加载检查点
+                for checkpoint_file in batch_files:
+                    checkpoint_path = os.path.join(checkpoint_dir, checkpoint_file)
+                    try:
+                        with open(checkpoint_path, 'rb') as f:
+                            slide_data = pickle.load(f)
+                            slide_id = slide_data.get('slide_id', checkpoint_file.replace('.pkl', ''))
+
+                            # 累积数据
+                            intra_graphs[slide_id] = slide_data['intra_patch_graphs']
+                            inter_graphs[slide_id] = slide_data['inter_patch_graph']
+                            bulk_expressions[slide_id] = slide_data['bulk_expr']
+                            all_cell_features[slide_id] = slide_data['all_cell_features']
+                            all_cell_positions[slide_id] = slide_data['all_cell_positions']
+                            cluster_labels[slide_id] = slide_data['cluster_labels']
+                            graph_status[slide_id] = slide_data.get('has_graphs', False)
+                            cell_to_graph_mappings[slide_id] = slide_data.get('cell_to_graph_mapping', None)
+                            slide_to_patient_mapping[slide_id] = slide_data['patient_id']
+
+                            metadata[slide_id] = {
+                                'slide_id': slide_id,
+                                'patient_id': slide_data['patient_id'],
+                                'num_cells': len(slide_data['cells_df']),
+                                'num_patches': len(slide_data['patches']),
+                                'intra_graph_count': len(slide_data['intra_patch_graphs']),
+                                'inter_graph_edges': slide_data['inter_patch_graph'].edge_index.shape[1],
+                                'has_bulk_expr': slide_data['bulk_expr'] is not None,
+                                'has_graphs': slide_data.get('has_graphs', False),
+                                'total_cell_features': slide_data['all_cell_features'].shape[0],
+                                'cell_feature_dim': slide_data['all_cell_features'].shape[1]
+                            }
+                    except Exception as e:
+                        print(f"警告: 无法加载检查点 {checkpoint_path}: {e}")
+                        continue
+
+                # 每批处理完后，立即保存中间结果，避免内存累积过多
+                if batch_idx < total_batches - 1:  # 不是最后一批时进行中间保存
+                    print(f"    第 {batch_idx + 1} 批处理完成，保存中间结果...")
+                    self._save_split_data_partial(split, intra_graphs, inter_graphs, bulk_expressions,
+                                                all_cell_features, all_cell_positions, cluster_labels,
+                                                graph_status, cell_to_graph_mappings, slide_to_patient_mapping,
+                                                metadata, output_dir, batch_idx + 1)
+
+                    # 清理已保存的数据，释放内存
+                    intra_graphs.clear()
+                    inter_graphs.clear()
+                    bulk_expressions.clear()
+                    all_cell_features.clear()
+                    all_cell_positions.clear()
+                    cluster_labels.clear()
+                    graph_status.clear()
+                    cell_to_graph_mappings.clear()
+                    slide_to_patient_mapping.clear()
+                    metadata.clear()
             
-            for slide_id, slide_data in split_data.items():
-                intra_graphs[slide_id] = slide_data['intra_patch_graphs']
-                inter_graphs[slide_id] = slide_data['inter_patch_graph']
-                bulk_expressions[slide_id] = slide_data['bulk_expr']
-                all_cell_features[slide_id] = slide_data['all_cell_features']
-                all_cell_positions[slide_id] = slide_data['all_cell_positions']
-                cluster_labels[slide_id] = slide_data['cluster_labels']
-                graph_status[slide_id] = slide_data.get('has_graphs', False)
-                cell_to_graph_mappings[slide_id] = slide_data.get('cell_to_graph_mapping', None)
-                slide_to_patient_mapping[slide_id] = slide_data['patient_id']  # 保存切片到患者的映射
-                
-                metadata[slide_id] = {
-                    'slide_id': slide_id,
-                    'patient_id': slide_data['patient_id'],
-                    'num_cells': len(slide_data['cells_df']),
-                    'num_patches': len(slide_data['patches']),
-                    'intra_graph_count': len(slide_data['intra_patch_graphs']),
-                    'inter_graph_edges': slide_data['inter_patch_graph'].edge_index.shape[1],
-                    'has_bulk_expr': slide_data['bulk_expr'] is not None,
-                    'has_graphs': slide_data.get('has_graphs', False),
-                    'total_cell_features': slide_data['all_cell_features'].shape[0],
-                    'cell_feature_dim': slide_data['all_cell_features'].shape[1]
-                }
-            
-            # 保存文件
-            intra_path = os.path.join(output_dir, f"bulk_{split}_intra_patch_graphs.pkl")
-            inter_path = os.path.join(output_dir, f"bulk_{split}_inter_patch_graphs.pkl")
-            bulk_path = os.path.join(output_dir, f"bulk_{split}_expressions.pkl")
-            features_path = os.path.join(output_dir, f"bulk_{split}_all_cell_features.pkl")
-            positions_path = os.path.join(output_dir, f"bulk_{split}_all_cell_positions.pkl")
-            clusters_path = os.path.join(output_dir, f"bulk_{split}_cluster_labels.pkl")
-            status_path = os.path.join(output_dir, f"bulk_{split}_graph_status.pkl")
-            mappings_path = os.path.join(output_dir, f"bulk_{split}_cell_to_graph_mappings.pkl")
-            slide_mappings_path = os.path.join(output_dir, f"bulk_{split}_slide_to_patient_mapping.pkl")  # 新增
-            metadata_path = os.path.join(output_dir, f"bulk_{split}_metadata.json")
-            
-            with open(intra_path, 'wb') as f:
-                pickle.dump(intra_graphs, f)
-            
-            with open(inter_path, 'wb') as f:
-                pickle.dump(inter_graphs, f)
-            
-            with open(bulk_path, 'wb') as f:
-                pickle.dump(bulk_expressions, f)
-                
-            with open(features_path, 'wb') as f:
-                pickle.dump(all_cell_features, f)
-                
-            with open(positions_path, 'wb') as f:
-                pickle.dump(all_cell_positions, f)
-                
-            with open(clusters_path, 'wb') as f:
-                pickle.dump(cluster_labels, f)
-                
-            with open(status_path, 'wb') as f:
-                pickle.dump(graph_status, f)
-                
-            with open(mappings_path, 'wb') as f:
-                pickle.dump(cell_to_graph_mappings, f)
-                
-            with open(slide_mappings_path, 'wb') as f:  # 新增：保存切片到患者的映射
-                pickle.dump(slide_to_patient_mapping, f)
-            
-            with open(metadata_path, 'w') as f:
-                json.dump(metadata, f, indent=2)
+            # 保存最终结果
+            self._save_split_data_final(split, intra_graphs, inter_graphs, bulk_expressions,
+                                      all_cell_features, all_cell_positions, cluster_labels,
+                                      graph_status, cell_to_graph_mappings, slide_to_patient_mapping,
+                                      metadata, output_dir)
             
             # 统计信息
-            total_slides = len(split_data)
+            total_slides = len(metadata)
             slides_with_graphs = sum([status for status in graph_status.values()])
             slides_without_graphs = total_slides - slides_with_graphs
             unique_patients = len(set(slide_to_patient_mapping.values()))
@@ -1055,18 +1083,173 @@ class BulkStaticGraphBuilder:
         print(f"\n配置文件: {config_path}")
         return metadata
 
+    def _save_split_data_partial(self, split, intra_graphs, inter_graphs, bulk_expressions,
+                                all_cell_features, all_cell_positions, cluster_labels,
+                                graph_status, cell_to_graph_mappings, slide_to_patient_mapping,
+                                metadata, output_dir, batch_idx):
+        """分批保存中间结果（用于内存优化）"""
+        temp_dir = os.path.join(output_dir, f"temp_{split}_batch_{batch_idx}")
+        os.makedirs(temp_dir, exist_ok=True)
+
+        # 保存到临时目录
+        paths = {
+            'intra': os.path.join(temp_dir, f"bulk_{split}_intra_patch_graphs_batch_{batch_idx}.pkl"),
+            'inter': os.path.join(temp_dir, f"bulk_{split}_inter_patch_graphs_batch_{batch_idx}.pkl"),
+            'bulk': os.path.join(temp_dir, f"bulk_{split}_expressions_batch_{batch_idx}.pkl"),
+            'features': os.path.join(temp_dir, f"bulk_{split}_all_cell_features_batch_{batch_idx}.pkl"),
+            'positions': os.path.join(temp_dir, f"bulk_{split}_all_cell_positions_batch_{batch_idx}.pkl"),
+            'clusters': os.path.join(temp_dir, f"bulk_{split}_cluster_labels_batch_{batch_idx}.pkl"),
+            'status': os.path.join(temp_dir, f"bulk_{split}_graph_status_batch_{batch_idx}.pkl"),
+            'mappings': os.path.join(temp_dir, f"bulk_{split}_cell_to_graph_mappings_batch_{batch_idx}.pkl"),
+            'slide_mappings': os.path.join(temp_dir, f"bulk_{split}_slide_to_patient_mapping_batch_{batch_idx}.pkl"),
+            'metadata': os.path.join(temp_dir, f"bulk_{split}_metadata_batch_{batch_idx}.json")
+        }
+
+        for name, path in paths.items():
+            if name.endswith('.pkl'):
+                with open(path, 'wb') as f:
+                    if name == 'intra':
+                        pickle.dump(intra_graphs, f)
+                    elif name == 'inter':
+                        pickle.dump(inter_graphs, f)
+                    elif name == 'bulk':
+                        pickle.dump(bulk_expressions, f)
+                    elif name == 'features':
+                        pickle.dump(all_cell_features, f)
+                    elif name == 'positions':
+                        pickle.dump(all_cell_positions, f)
+                    elif name == 'clusters':
+                        pickle.dump(cluster_labels, f)
+                    elif name == 'status':
+                        pickle.dump(graph_status, f)
+                    elif name == 'mappings':
+                        pickle.dump(cell_to_graph_mappings, f)
+                    elif name == 'slide_mappings':
+                        pickle.dump(slide_to_patient_mapping, f)
+            else:  # metadata json
+                with open(path, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+
+    def _save_split_data_final(self, split, intra_graphs, inter_graphs, bulk_expressions,
+                              all_cell_features, all_cell_positions, cluster_labels,
+                              graph_status, cell_to_graph_mappings, slide_to_patient_mapping,
+                              metadata, output_dir):
+        """最终保存所有数据（合并所有批次的结果）"""
+        print(f"  合并并保存{split}集最终结果...")
+
+        # 检查是否有临时批次文件需要合并
+        temp_pattern = f"temp_{split}_batch_*"
+        import glob
+        temp_dirs = glob.glob(os.path.join(output_dir, temp_pattern))
+
+        if temp_dirs:
+            print(f"  发现 {len(temp_dirs)} 个临时批次，需要合并")
+            # 重新从所有检查点文件加载完整数据
+            print(f"  重新从检查点加载{split}集的完整数据...")
+            checkpoint_dir_path = os.path.join(self.checkpoint_dir, split)
+            all_checkpoints = self.load_all_checkpoints(split)
+
+            # 从加载的检查点重新构建数据
+            for slide_id, slide_data in all_checkpoints.items():
+                intra_graphs[slide_id] = slide_data['intra_patch_graphs']
+                inter_graphs[slide_id] = slide_data['inter_patch_graph']
+                bulk_expressions[slide_id] = slide_data['bulk_expr']
+                all_cell_features[slide_id] = slide_data['all_cell_features']
+                all_cell_positions[slide_id] = slide_data['all_cell_positions']
+                cluster_labels[slide_id] = slide_data['cluster_labels']
+                graph_status[slide_id] = slide_data.get('has_graphs', False)
+                cell_to_graph_mappings[slide_id] = slide_data.get('cell_to_graph_mapping', None)
+                slide_to_patient_mapping[slide_id] = slide_data['patient_id']
+
+                metadata[slide_id] = {
+                    'slide_id': slide_id,
+                    'patient_id': slide_data['patient_id'],
+                    'num_cells': len(slide_data['cells_df']),
+                    'num_patches': len(slide_data['patches']),
+                    'intra_graph_count': len(slide_data['intra_patch_graphs']),
+                    'inter_graph_edges': slide_data['inter_patch_graph'].edge_index.shape[1],
+                    'has_bulk_expr': slide_data['bulk_expr'] is not None,
+                    'has_graphs': slide_data.get('has_graphs', False),
+                    'total_cell_features': slide_data['all_cell_features'].shape[0],
+                    'cell_feature_dim': slide_data['all_cell_features'].shape[1]
+                }
+
+        # 最终保存路径
+        intra_path = os.path.join(output_dir, f"bulk_{split}_intra_patch_graphs.pkl")
+        inter_path = os.path.join(output_dir, f"bulk_{split}_inter_patch_graphs.pkl")
+        bulk_path = os.path.join(output_dir, f"bulk_{split}_expressions.pkl")
+        features_path = os.path.join(output_dir, f"bulk_{split}_all_cell_features.pkl")
+        positions_path = os.path.join(output_dir, f"bulk_{split}_all_cell_positions.pkl")
+        clusters_path = os.path.join(output_dir, f"bulk_{split}_cluster_labels.pkl")
+        status_path = os.path.join(output_dir, f"bulk_{split}_graph_status.pkl")
+        mappings_path = os.path.join(output_dir, f"bulk_{split}_cell_to_graph_mappings.pkl")
+        slide_mappings_path = os.path.join(output_dir, f"bulk_{split}_slide_to_patient_mapping.pkl")
+        metadata_path = os.path.join(output_dir, f"bulk_{split}_metadata.json")
+
+        with open(intra_path, 'wb') as f:
+            pickle.dump(intra_graphs, f)
+
+        with open(inter_path, 'wb') as f:
+            pickle.dump(inter_graphs, f)
+
+        with open(bulk_path, 'wb') as f:
+            pickle.dump(bulk_expressions, f)
+
+        with open(features_path, 'wb') as f:
+            pickle.dump(all_cell_features, f)
+
+        with open(positions_path, 'wb') as f:
+            pickle.dump(all_cell_positions, f)
+
+        with open(clusters_path, 'wb') as f:
+            pickle.dump(cluster_labels, f)
+
+        with open(status_path, 'wb') as f:
+            pickle.dump(graph_status, f)
+
+        with open(mappings_path, 'wb') as f:
+            pickle.dump(cell_to_graph_mappings, f)
+
+        with open(slide_mappings_path, 'wb') as f:
+            pickle.dump(slide_to_patient_mapping, f)
+
+        with open(metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+
+        # 统计信息
+        total_slides = len(metadata)
+        slides_with_graphs = sum([status for status in graph_status.values()])
+        slides_without_graphs = total_slides - slides_with_graphs
+        unique_patients = len(set(slide_to_patient_mapping.values()))
+
+        print(f"{split}集保存完成:")
+        print(f"  - 总切片数: {total_slides}")
+        print(f"  - 覆盖患者数: {unique_patients}")
+        print(f"  - 有图数据切片: {slides_with_graphs}")
+        print(f"  - 无图数据切片: {slides_without_graphs} (保留完整DINO特征)")
+        print(f"  - Patch内图: {intra_path}")
+        print(f"  - Patch间图: {inter_path}")
+        print(f"  - Bulk表达: {bulk_path}")
+        print(f"  - 细胞特征: {features_path}")
+        print(f"  - 细胞坐标: {positions_path}")
+        print(f"  - 聚类标签: {clusters_path}")
+        print(f"  - 图状态: {status_path}")
+        print(f"  - 细胞映射: {mappings_path}")
+        print(f"  - 切片映射: {slide_mappings_path}")
+        print(f"  - 元数据: {metadata_path}")
+
 
 def main():
     """主函数"""
     
     # 配置参数
-    train_features_dir = "/mnt/data_sdc1/graph_data/extracted_features_dinov3_train"
-    test_features_dir = "/mnt/data_sdc1/graph_data/extracted_features_dinov3_test"
-    bulk_csv_path = "/mnt/data_sdc1/graph_data/tpm-TCGA-BRCA.csv"
-    patches_dir = "/mnt/data_sdc1/graph_data/output_patches"
-    wsi_input_dir = "/mnt/data_sdc1/graph_data/BRCA"
-    output_dir = "/data/yujk/hovernet2feature/Cell2Gene/bulk_BRCA_graphs_new_all_graph_300"
-    checkpoint_dir = "/data/yujk/hovernet2feature/Cell2Gene/bulk_BRCA_graphs_checkpoints"  # 检查点目录，用于断点续传
+    train_features_dir = "/media/yujk/Elements/ouput_features/PRAD_train"
+    test_features_dir = "/media/yujk/Elements/ouput_features/PRAD_test"
+    bulk_csv_path = "/data/hdd2/yujk/TPM/tpm-TCGA-PRAD.csv"
+    patches_dir = "/data/hdd2/yujk/TCGA_patches/PRAD"
+    wsi_input_dir = "/data/hdd2/yujk/TCGA/PRAD"
+    output_dir = "/data/hdd1/yujk/bulk_PRAD_graphs_new_all_graph"
+    checkpoint_dir = "/data/hdd1/yujk/bulk_PRAD_graphs_checkpoints"  # 检查点目录，用于断点续传
     
     # 图构建参数（方案3：提升GPU利用率的新参数）
     intra_patch_distance_threshold = 256   # patch内细胞连接距离阈值（像素）- 从250增加到256
@@ -1074,8 +1257,8 @@ def main():
     use_deep_features = True              # 使用深度特征
     feature_dim = 128                     # 特征维度
     max_cells_per_patch = None           # 每个patch的最大细胞数 - 不限制
-    max_train_slides = 300              # 仅处理训练集前N个特征文件，None表示全部
-    max_test_slides = 75               # 仅处理测试集前N个特征文件，None表示全部
+    max_train_slides = 200              # 仅处理训练集前N个特征文件，None表示全部
+    max_test_slides = 50               # 仅处理测试集前N个特征文件，None表示全部
     
     print("=== Bulk数据集静态图构建（使用预分割patch）- 新逻辑版本（支持断点续传）===")
     print(f"训练特征目录: {train_features_dir}")

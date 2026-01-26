@@ -60,11 +60,11 @@ def main():
     
     # Configuration parameters
     hest_data_dir = "/data/yujk/hovernet2feature/HEST/hest_data"
-    graph_dir = "/data/yujk/hovernet2feature/hest_graphs_normalized_dinov3"
-    features_dir = "/data/yujk/hovernet2feature/hest_normalized_dinov3"
+    graph_dir = "/data/yujk/hovernet2feature/hest_graphs_dinov3_other_cancer"
+    features_dir = "/data/yujk/hovernet2feature/hest_dinov3_other_cancer"
 
     # Specify gene file
-    gene_file = "/data/yujk/hovernet2feature/cscc_coad_common_genes.txt"
+    gene_file = "/data/yujk/hovernet2feature/selected_hvg_genes_hest1k_100.txt"
 
     batch_size = 128
     num_epochs = 60
@@ -75,7 +75,7 @@ def main():
     # 迁移学习配置
     use_transfer_learning = os.environ.get(
         "USE_TRANSFER_LEARNING", "false").lower() == "true"
-    bulk_model_path = "/data/yujk/hovernet2feature/best_bulk_static_372_optimized_model.pt"
+    bulk_model_path = "/data/yujk/hovernet2feature/best_BRCA_lora_model_cluster.pt"
     freeze_backbone = os.environ.get(
         "FREEZE_BACKBONE", "false").lower() == "true"
 
@@ -90,7 +90,7 @@ def main():
 
     # Gene variance normalization control
     # Set to True to apply per-gene variance normalization, False to disable
-    use_gene_normalization = True # Change this to False to disable gene variance normalization
+    use_gene_normalization = True
 
     print("=== HEST Spatial Supervised Training ===")
     print("✓ Using direct file reading (no HEST API required)")
@@ -149,8 +149,11 @@ def main():
 
     if cv_mode == "kfold":
         # Execute 10-fold cross validation (starting from specified fold)
-        fold_plan = [(fi,)+get_fold_samples(fi)
-                     for fi in range(start_fold, 10)]
+        # Skip folds that have already been completed
+        fold_plan = []
+        for fi in range(start_fold, 10):
+            if fi not in all_fold_results:
+                fold_plan.append((fi,)+get_fold_samples(fi))
     elif cv_mode == "loo":
         # Build leave-one-out plan by scanning all samples from the fold definition union
         # Reuse get_fold_samples to enumerate all samples across folds
@@ -182,24 +185,31 @@ def main():
                 raise ValueError(
                     f"Held-out sample(s) not found: {missing}. Available: {sorted(all_samples)}")
             print(f"✓ LOO held-out specified: {requested}")
-            fold_plan = [
-                (i, [s for s in all_samples if s not in {heldout}], [heldout])
-                for i, heldout in enumerate(requested)
-            ]
+            fold_plan = []
+            for i, heldout in enumerate(requested):
+                if i not in all_fold_results:
+                    fold_plan.append((i, [s for s in all_samples if s not in {heldout}], [heldout]))
         else:
             # default: iterate all samples as held-out one by one
-            fold_plan = [
-                (i, [s for s in all_samples if s != heldout], [heldout])
-                for i, heldout in enumerate(all_samples)
-            ]
+            # Skip folds that have already been completed
+            fold_plan = []
+            for i, heldout in enumerate(all_samples):
+                if i not in all_fold_results:
+                    fold_plan.append((i, [s for s in all_samples if s != heldout], [heldout]))
     else:
         raise ValueError(f"Unknown CV_MODE: {cv_mode}")
+
+    # Show summary of folds to be processed
+    if all_fold_results:
+        print(f"✓ Resuming from previous run: {len(all_fold_results)} folds already completed")
+        completed_folds = sorted(all_fold_results.keys())
+        print(f"  Already completed folds: {completed_folds}")
 
     for fold_tuple in fold_plan:
         fold_idx, train_samples, test_samples = fold_tuple
         total_folds = len(fold_plan)
         print(f"\n{'='*50}")
-        print(f"Starting Fold {fold_idx + 1}/{total_folds}")
+        print(f"Starting Fold {fold_idx + 1} (remaining: {total_folds})")
         print(f"{'='*50}")
 
         # Get current fold train and test samples
@@ -281,8 +291,8 @@ def main():
         # Train model
         train_losses, test_losses, epoch_mean_gene_corrs, epoch_overall_corrs = train_hest_graph_model(
             model, train_loader, test_loader, optimizer, scheduler,
-            num_epochs=num_epochs, device="cuda:0", patience=patience, min_delta=min_delta, fold_idx=fold_idx,
-            cluster_loss_weight=0.1, checkpoint_path=best_model_path
+            num_epochs=num_epochs, device="cuda:1", patience=patience, min_delta=min_delta, fold_idx=fold_idx,
+            cluster_loss_weight=0, checkpoint_path=best_model_path
         )
 
         # Load best model for evaluation
@@ -292,8 +302,30 @@ def main():
             print("Loaded best model weights for evaluation")
 
         # Evaluate model performance
-        eval_results, predictions, targets = evaluate_model_metrics(
-            model, test_loader, device)
+        try:
+            eval_results, predictions, targets = evaluate_model_metrics(
+                model, test_loader, device)
+        except Exception as e:
+            print(f"Warning: Evaluation failed for fold {fold_idx + 1}: {e}")
+            print("Skipping this fold and continuing with zero metrics...")
+            # Return zero metrics when evaluation fails
+            eval_results = {
+                'overall_mse': 0.0,
+                'overall_correlation': 0.0,
+                'overall_correlation_pval': 1.0,
+                'mean_gene_correlation': 0.0,
+                'median_gene_correlation': 0.0,
+                'std_gene_correlation': 0.0,
+                'mean_spot_correlation': 0.0,
+                'median_spot_correlation': 0.0,
+                'std_spot_correlation': 0.0,
+                'gene_correlations': [],
+                'spot_correlations': [],
+                'gene_mses': [],
+                'spot_mses': []
+            }
+            predictions = None
+            targets = None
 
         # Compute best pearsons during training epochs
         best_overall_pearson = float(

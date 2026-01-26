@@ -23,7 +23,7 @@ import numpy as np
 
 # ====== 用户可编辑配置（无需命令行） ======
 # 指向存放 {sample_id}_combined_features.npz 的目录
-FEATURES_DIR: str = "/data/yujk/hovernet2feature/hest_dinov3_cscc"
+FEATURES_DIR: str = "/data/yujk/hovernet2feature/hest_dinov3_other_cancer"
 # 指定要处理的样本 ID 列表；留空或设为 None 则处理目录下全部匹配文件
 SAMPLE_IDS: List[str] | None = None
 # 聚类类别数

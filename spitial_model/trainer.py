@@ -140,7 +140,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
                 scaler.unscale_(optimizer)
                 # 放宽梯度裁剪，允许更大的梯度更新
                 torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), max_norm=10.0)
+                    model.parameters(), max_norm=5.0)
                 scaler.step(optimizer)
                 scaler.update()
 
