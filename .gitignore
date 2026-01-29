@@ -10,4 +10,5 @@
 *.csv
 *.tif
 *.pkl
+*.gz
 *__pycache__
