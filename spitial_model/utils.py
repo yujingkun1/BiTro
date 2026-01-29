@@ -56,12 +56,12 @@ def get_fold_samples(fold_idx, all_samples=None):
     #    'NCBI764', 'NCBI763', 'NCBI762', 'NCBI761', 'NCBI760', 'NCBI759'],
 
     # }
-    fold_splits = {
-        0: ['TENX118','TENX141'], # LUNG
-    }
     # fold_splits = {
-    #     0: ['NCBI642', 'NCBI643'], # HCC
+    #     0: ['TENX118','TENX141'], # LUNG
     # }
+    fold_splits = {
+        0: ['NCBI642', 'NCBI643'], # HCC
+    }
     # fold_splits = {
     #     0: ['TENX116', 'TENX126','TENX140'], # PAAD
     # }

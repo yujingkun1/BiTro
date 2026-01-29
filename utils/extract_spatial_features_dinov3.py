@@ -409,12 +409,12 @@ class HESTCellFeatureExtractor:
             center_x = (bounds[0] + bounds[2]) / 2
             center_y = (bounds[1] + bounds[3]) / 2
 
-            # 定义patch区域
+            # 定义patch区域（使用 round 保持与 debug 脚本一致的像素中心对齐）
             half_size = patch_size // 2
-            x1 = max(0, int(center_x - half_size))
-            y1 = max(0, int(center_y - half_size))
-            x2 = min(wsi_image.shape[1], int(center_x + half_size))
-            y2 = min(wsi_image.shape[0], int(center_y + half_size))
+            x1 = max(0, int(round(center_x - half_size)))
+            y1 = max(0, int(round(center_y - half_size)))
+            x2 = min(wsi_image.shape[1], int(round(center_x + half_size)))
+            y2 = min(wsi_image.shape[0], int(round(center_y + half_size)))
 
             # 提取patch
             cell_patch = wsi_image[y1:y2, x1:x2]
@@ -896,18 +896,18 @@ class HESTCellFeatureExtractor:
             centroid = geom.centroid
             center_x, center_y = centroid.x, centroid.y
 
-            # 计算在指定级别下的坐标
+            # 计算在指定级别下的坐标（使用 round 与 debug 脚本保持一致）
             scale_factor = wsi.level_downsamples[level]
             half_size = patch_size // 2
 
-            # 计算WSI边界
+            # 计算WSI边界（level 对应的尺寸）
             wsi_width, wsi_height = wsi.level_dimensions[level]
 
-            # 计算提取区域坐标
-            x_start = int(center_x - half_size * scale_factor)
-            y_start = int(center_y - half_size * scale_factor)
-            x_end = x_start + int(patch_size * scale_factor)
-            y_end = y_start + int(patch_size * scale_factor)
+            # 计算提取区域坐标（四舍五入到整数像素，兼容 SimpleWSI）
+            x_start = int(round(center_x - half_size * scale_factor))
+            y_start = int(round(center_y - half_size * scale_factor))
+            x_end = x_start + int(round(patch_size * scale_factor))
+            y_end = y_start + int(round(patch_size * scale_factor))
 
             # 创建黑色填充的patch
             cell_patch = np.zeros((patch_size, patch_size, 3), dtype=np.uint8)
@@ -915,8 +915,9 @@ class HESTCellFeatureExtractor:
             # 计算WSI内的有效区域
             valid_x_start = max(0, x_start)
             valid_y_start = max(0, y_start)
-            valid_x_end = min(wsi_width * scale_factor, x_end)
-            valid_y_end = min(wsi_height * scale_factor, y_end)
+            # wsi.level_dimensions[level] 已表示该 level 的像素尺寸，直接与 x_end 比较
+            valid_x_end = min(wsi_width, x_end)
+            valid_y_end = min(wsi_height, y_end)
 
             # 如果有有效区域，提取该部分
             if valid_x_start < valid_x_end and valid_y_start < valid_y_end:
@@ -939,9 +940,9 @@ class HESTCellFeatureExtractor:
 
                     # 计算在patch中的放置位置
                     patch_x_start = max(
-                        0, int((valid_x_start - x_start) / scale_factor))
+                        0, int(round((valid_x_start - x_start) / (scale_factor if scale_factor != 0 else 1))))
                     patch_y_start = max(
-                        0, int((valid_y_start - y_start) / scale_factor))
+                        0, int(round((valid_y_start - y_start) / (scale_factor if scale_factor != 0 else 1))))
                     patch_x_end = min(
                         patch_size, patch_x_start + region_array.shape[1])
                     patch_y_end = min(
@@ -1042,6 +1043,39 @@ class HESTCellFeatureExtractor:
             dino_features = np.nan_to_num(
                 dino_features, posinf=1.0, neginf=-1.0)
 
+        # 诊断：检测是否存在退化特征（例如所有行或列接近相同/为零）
+        try:
+            # 每列标准差
+            col_std = dino_features.std(axis=0)
+            zero_std_cols = int(np.sum(col_std < 1e-8))
+            print(f"  诊断: DINO 特征列 std 为 0 或接近 0 的数量: {zero_std_cols}/{dino_features.shape[1]}")
+            # 列 std 的分位数
+            std_percentiles = np.percentile(col_std, [0, 1, 5, 25, 50, 75, 95, 99, 100])
+            print(f"  诊断: 列 std 分位数: {std_percentiles}")
+
+            # 行级别：抽样检查重复行比例（避免对全部数据执行昂贵的唯一性计算）
+            n_samples = min(2000, dino_features.shape[0])
+            rng = np.random.default_rng(42)
+            idx = rng.choice(dino_features.shape[0], size=n_samples, replace=False)
+            sample_rows = np.round(dino_features[idx, :], decimals=6)
+            unique_rows = np.unique(sample_rows, axis=0)
+            unique_frac = unique_rows.shape[0] / float(n_samples)
+            print(f"  诊断: 在 {n_samples} 个随机样本中，唯一行比例: {unique_frac:.3f}")
+
+            # 全部数据是否为常数向量（通过检查总体方差）
+            total_var = np.var(dino_features)
+            print(f"  诊断: DINO 特征总体方差: {total_var:.6e}")
+
+            # 将前10行保存为预览以便人工检查（文件小）
+            try:
+                preview_path = os.path.join(self.output_dir, f"{sample_id}_dino_features_preview.npy")
+                np.save(preview_path, dino_features[:10])
+                print(f"  诊断: 已保存前10个 DINO 特征到: {preview_path}")
+            except Exception as _e:
+                print(f"  诊断: 无法保存 preview: {_e}")
+        except Exception as _e:
+            print(f"  诊断失败: {_e}")
+
         # 检查是否还有有效的特征
         if np.all(dino_features == 0):
             print(f"  错误: 所有特征都为0，无法进行PCA")
@@ -1131,7 +1165,8 @@ class HESTCellFeatureExtractor:
         """
         output_file = os.path.join(
             self.output_dir, f"{sample_id}_combined_features.npz")
-        temp_file = output_file + ".tmp"
+        # 使用明确的临时npz文件名，避免 np.savez 自动追加 ".npz" 导致的路径不匹配
+        temp_file = output_file + ".tmp.npz"
 
         # 组装保存字典
         save_dict = {
@@ -1259,7 +1294,7 @@ def verify_sample_file_integrity(output_dir, sample_id, expected_num_cells=None)
         return False, 0, "PCA模型文件不存在"
     
     # 检查是否有临时文件残留（说明上次保存未完成）
-    temp_file = output_file + ".tmp"
+    temp_file = output_file + ".tmp.npz"
     if os.path.exists(temp_file):
         return False, 0, "检测到临时文件残留，上次保存可能未完成"
     
@@ -1389,7 +1424,7 @@ def remove_incomplete_files(output_dir, sample_id):
     output_file = os.path.join(
         output_dir, f"{sample_id}_combined_features.npz")
     pca_file = os.path.join(output_dir, f"{sample_id}_dino_pca_model.pkl")
-    temp_file = output_file + ".tmp"
+    temp_file = output_file + ".tmp.npz"
     
     removed_files = []
     for file_path in [output_file, pca_file, temp_file]:

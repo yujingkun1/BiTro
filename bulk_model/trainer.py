@@ -242,15 +242,30 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
                         cell_predictions_list = [cell_predictions]
 
                     if cell_predictions_list:
-                        all_cell_predictions = torch.cat([pred for pred in cell_predictions_list if pred.shape[0] > 0], dim=0)
-                        if all_cell_predictions.shape[0] > 0:
-                            aggregated_prediction = all_cell_predictions.sum(dim=0, keepdim=True)
-                            if log_this_batch:
-                                print(f"    患者 {i+1} 预测聚合：细胞数={all_cell_predictions.shape[0]}, 聚合结果形状={aggregated_prediction.shape}")
+                        # Detect whether model returned gene-level per-graph outputs (1D tensor length == num_genes)
+                        first_pred = cell_predictions_list[0]
+                        if isinstance(first_pred, torch.Tensor) and first_pred.dim() == 1 and first_pred.shape[0] == expressions.shape[1]:
+                            # gene-level outputs per graph: stack then sum across graphs to aggregate per-patient
+                            stacked = torch.stack([pred for pred in cell_predictions_list if pred.numel() > 0], dim=0)  # [num_graphs, G]
+                            if stacked.shape[0] > 0:
+                                aggregated_prediction = stacked.sum(dim=0, keepdim=True)  # [1, G]
+                                if log_this_batch:
+                                    print(f"    患者 {i+1} 基因级聚合：图数={stacked.shape[0]}, 聚合结果形状={aggregated_prediction.shape}")
+                            else:
+                                aggregated_prediction = torch.zeros(1, expressions.shape[1], device=device)
+                                if log_this_batch:
+                                    print(f"    患者 {i+1} 预测聚合：没有有效图，使用零预测")
                         else:
-                            aggregated_prediction = torch.zeros(1, expressions.shape[1], device=device)
-                            if log_this_batch:
-                                print(f"    患者 {i+1} 预测聚合：没有有效细胞，使用零预测")
+                            # node-level outputs: concatenate per-node predictions and sum across nodes
+                            all_cell_predictions = torch.cat([pred for pred in cell_predictions_list if pred.shape[0] > 0], dim=0)
+                            if all_cell_predictions.shape[0] > 0:
+                                aggregated_prediction = all_cell_predictions.sum(dim=0, keepdim=True)
+                                if log_this_batch:
+                                    print(f"    患者 {i+1} 预测聚合：细胞数={all_cell_predictions.shape[0]}, 聚合结果形状={aggregated_prediction.shape}")
+                            else:
+                                aggregated_prediction = torch.zeros(1, expressions.shape[1], device=device)
+                                if log_this_batch:
+                                    print(f"    患者 {i+1} 预测聚合：没有有效细胞，使用零预测")
                     else:
                         aggregated_prediction = torch.zeros(1, expressions.shape[1], device=device)
                         if log_this_batch:
@@ -399,11 +414,19 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
                         cell_predictions_list = [cell_predictions]
 
                     if cell_predictions_list:
-                        all_cell_predictions = torch.cat([pred for pred in cell_predictions_list if pred.shape[0] > 0], dim=0)
-                        if all_cell_predictions.shape[0] > 0:
-                            aggregated_prediction = all_cell_predictions.sum(dim=0, keepdim=True)
+                        first_pred = cell_predictions_list[0]
+                        if isinstance(first_pred, torch.Tensor) and first_pred.dim() == 1 and first_pred.shape[0] == expressions.shape[1]:
+                            stacked = torch.stack([pred for pred in cell_predictions_list if pred.numel() > 0], dim=0)
+                            if stacked.shape[0] > 0:
+                                aggregated_prediction = stacked.sum(dim=0, keepdim=True)
+                            else:
+                                aggregated_prediction = torch.zeros(1, expressions.shape[1], device=device)
                         else:
-                            aggregated_prediction = torch.zeros(1, expressions.shape[1], device=device)
+                            all_cell_predictions = torch.cat([pred for pred in cell_predictions_list if pred.shape[0] > 0], dim=0)
+                            if all_cell_predictions.shape[0] > 0:
+                                aggregated_prediction = all_cell_predictions.sum(dim=0, keepdim=True)
+                            else:
+                                aggregated_prediction = torch.zeros(1, expressions.shape[1], device=device)
                     else:
                         aggregated_prediction = torch.zeros(1, expressions.shape[1], device=device)
 

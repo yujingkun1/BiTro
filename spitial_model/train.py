@@ -64,11 +64,11 @@ def main():
     features_dir = "/data/yujk/hovernet2feature/hest_dinov3_other_cancer"
 
     # Specify gene file
-    gene_file = "/data/yujk/hovernet2feature/selected_hvg_genes_hest1k_100.txt"
+    gene_file = "/data/yujk/hovernet2feature/HEST-Bench/HCC/mean_50genes.txt"
 
     batch_size = 128
     num_epochs = 60
-    learning_rate = 1e-4
+    learning_rate = 1e-5
     weight_decay = 1e-5   # 恢复正常weight_decay
     feature_dim = 128
 
@@ -292,7 +292,7 @@ def main():
         train_losses, test_losses, epoch_mean_gene_corrs, epoch_overall_corrs = train_hest_graph_model(
             model, train_loader, test_loader, optimizer, scheduler,
             num_epochs=num_epochs, device="cuda:1", patience=patience, min_delta=min_delta, fold_idx=fold_idx,
-            cluster_loss_weight=0, checkpoint_path=best_model_path
+            cluster_loss_weight=0.1, checkpoint_path=best_model_path
         )
 
         # Load best model for evaluation

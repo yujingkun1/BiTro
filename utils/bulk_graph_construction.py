@@ -917,7 +917,19 @@ class BulkStaticGraphBuilder:
             slides_with_graphs = sum([status for status in graph_status.values()])
             slides_without_graphs = total_slides - slides_with_graphs
             unique_patients = len(set(slide_to_patient_mapping.values()))
-            
+
+            # 构造输出路径（与_save_split_data_final中保持一致）
+            intra_path = os.path.join(output_dir, f"bulk_{split}_intra_patch_graphs.pkl")
+            inter_path = os.path.join(output_dir, f"bulk_{split}_inter_patch_graphs.pkl")
+            bulk_path = os.path.join(output_dir, f"bulk_{split}_expressions.pkl")
+            features_path = os.path.join(output_dir, f"bulk_{split}_all_cell_features.pkl")
+            positions_path = os.path.join(output_dir, f"bulk_{split}_all_cell_positions.pkl")
+            clusters_path = os.path.join(output_dir, f"bulk_{split}_cluster_labels.pkl")
+            status_path = os.path.join(output_dir, f"bulk_{split}_graph_status.pkl")
+            mappings_path = os.path.join(output_dir, f"bulk_{split}_cell_to_graph_mappings.pkl")
+            slide_mappings_path = os.path.join(output_dir, f"bulk_{split}_slide_to_patient_mapping.pkl")
+            metadata_path = os.path.join(output_dir, f"bulk_{split}_metadata.json")
+
             print(f"{split}集保存完成:")
             print(f"  - 总切片数: {total_slides}")
             print(f"  - 覆盖患者数: {unique_patients}")
@@ -1186,35 +1198,58 @@ class BulkStaticGraphBuilder:
         slide_mappings_path = os.path.join(output_dir, f"bulk_{split}_slide_to_patient_mapping.pkl")
         metadata_path = os.path.join(output_dir, f"bulk_{split}_metadata.json")
 
+        print(f"  开始保存{split}集数据文件...")
+
+        print(f"  保存Patch内图...")
         with open(intra_path, 'wb') as f:
             pickle.dump(intra_graphs, f)
+        print(f"  ✓ Patch内图保存完成")
 
+        print(f"  保存Patch间图...")
         with open(inter_path, 'wb') as f:
             pickle.dump(inter_graphs, f)
+        print(f"  ✓ Patch间图保存完成")
 
+        print(f"  保存Bulk表达...")
         with open(bulk_path, 'wb') as f:
             pickle.dump(bulk_expressions, f)
+        print(f"  ✓ Bulk表达保存完成")
 
+        print(f"  保存细胞特征...")
         with open(features_path, 'wb') as f:
             pickle.dump(all_cell_features, f)
+        print(f"  ✓ 细胞特征保存完成")
 
+        print(f"  保存细胞坐标...")
         with open(positions_path, 'wb') as f:
             pickle.dump(all_cell_positions, f)
+        print(f"  ✓ 细胞坐标保存完成")
 
+        print(f"  保存聚类标签...")
         with open(clusters_path, 'wb') as f:
             pickle.dump(cluster_labels, f)
+        print(f"  ✓ 聚类标签保存完成")
 
+        print(f"  保存图状态...")
         with open(status_path, 'wb') as f:
             pickle.dump(graph_status, f)
+        print(f"  ✓ 图状态保存完成")
 
+        print(f"  保存细胞映射...")
         with open(mappings_path, 'wb') as f:
             pickle.dump(cell_to_graph_mappings, f)
+        print(f"  ✓ 细胞映射保存完成")
 
+        print(f"  保存切片映射...")
         with open(slide_mappings_path, 'wb') as f:
             pickle.dump(slide_to_patient_mapping, f)
+        print(f"  ✓ 切片映射保存完成")
 
+        print(f"  保存元数据...")
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2)
+        print(f"  ✓ 元数据保存完成")
+        print(f"  {split}集所有数据保存完毕！")
 
         # 统计信息
         total_slides = len(metadata)
@@ -1243,13 +1278,13 @@ def main():
     """主函数"""
     
     # 配置参数
-    train_features_dir = "/media/yujk/Elements/ouput_features/PRAD_train"
-    test_features_dir = "/media/yujk/Elements/ouput_features/PRAD_test"
-    bulk_csv_path = "/data/hdd2/yujk/TPM/tpm-TCGA-PRAD.csv"
-    patches_dir = "/data/hdd2/yujk/TCGA_patches/PRAD"
-    wsi_input_dir = "/data/hdd2/yujk/TCGA/PRAD"
-    output_dir = "/data/hdd1/yujk/bulk_PRAD_graphs_new_all_graph"
-    checkpoint_dir = "/data/hdd1/yujk/bulk_PRAD_graphs_checkpoints"  # 检查点目录，用于断点续传
+    train_features_dir = "/mnt/elements/ouput_features/PRAD_train"
+    test_features_dir = "/mnt/elements/ouput_features/PRAD_test"
+    bulk_csv_path = "/mnt/elements/PRAD/tpm-TCGA-PRAD.csv"
+    patches_dir = "/mnt/elements/PRAD/PRAD"
+    wsi_input_dir = "/mnt/elements/PRAD/PRAD_svs"
+    output_dir = "/mnt/elements/PRAD/bulk_PRAD_graphs_new_all_graph"
+    checkpoint_dir = "/mnt/elements/PRAD/bulk_PRAD_graphs_checkpoints"  # 检查点目录，用于断点续传
     
     # 图构建参数（方案3：提升GPU利用率的新参数）
     intra_patch_distance_threshold = 256   # patch内细胞连接距离阈值（像素）- 从250增加到256

@@ -53,7 +53,8 @@ def collate_fn_bulk_372(batch):
 
 
 class BulkStaticGraphDataset372(Dataset):
-    def __init__(self, graph_data_dir, split='train', selected_genes=None, max_samples=None, fold_config=None, tpm_csv_file=None):
+    def __init__(self, graph_data_dir, split='train', selected_genes=None, max_samples=None, fold_config=None, tpm_csv_file=None,
+                 apply_gene_normalization: bool = True, normalization_stats: dict = None, normalization_eps: float = 1e-6):
         super().__init__()
         self.graph_data_dir = graph_data_dir
         self.split = split
@@ -61,12 +62,29 @@ class BulkStaticGraphDataset372(Dataset):
         self.max_samples = max_samples
         self.fold_config = fold_config
         self.tpm_csv_file = tpm_csv_file
+        # Gene normalization settings
+        self.apply_gene_normalization = apply_gene_normalization
+        self._provided_normalization_stats = normalization_stats
+        self._normalization_eps = normalization_eps
+        self.gene_mean_np = None
+        self.gene_std_np = None
+        self.gene_mean_tensor = None
+        self.gene_std_tensor = None
         self.load_graph_data()
         if self.fold_config:
             self.apply_fold_filter()
         print(f"加载{split}集: {len(self.data_keys)}个数据项")
         if self.selected_genes:
             self.filter_genes()
+        # Prepare per-gene normalization stats (if enabled)
+        try:
+            self.setup_gene_normalization()
+        except Exception as e:
+            # For non-train splits without provided stats, raise a clearer error
+            if self.apply_gene_normalization and self.split != 'train' and self._provided_normalization_stats is None:
+                raise
+            else:
+                print(f"[normalization] setup skipped or failed: {e}")
 
     def load_graph_data(self):
         print(f"加载{self.split}集的静态图数据...")
@@ -297,6 +315,44 @@ class BulkStaticGraphDataset372(Dataset):
             sample_total = np.sum(sample_data)
             print(f"TPM数据验证：样本患者 {sample_patient} 表达值总和: {sample_total:.2f}")
 
+    def setup_gene_normalization(self):
+        """
+        Compute or load per-gene mean/std for z-score normalization of target TPM values.
+        """
+        if not self.apply_gene_normalization:
+            print("[normalization] Gene normalization disabled")
+            return
+
+        if self._provided_normalization_stats is not None:
+            print("[normalization] Using provided gene normalization statistics")
+            if not isinstance(self._provided_normalization_stats, dict):
+                raise TypeError("normalization_stats must be a dict containing 'mean' and 'std'")
+            mean = self._provided_normalization_stats.get('mean')
+            std = self._provided_normalization_stats.get('std')
+            if mean is None or std is None:
+                raise ValueError("normalization_stats must include both 'mean' and 'std'")
+            mean = np.asarray(mean, dtype=np.float32)
+            std = np.asarray(std, dtype=np.float32)
+        else:
+            if self.split != 'train':
+                raise ValueError("Normalization stats must be provided when split is not 'train'")
+            if not self.expressions_data:
+                raise RuntimeError("Cannot compute normalization stats: expressions_data is empty")
+            print("[normalization] Computing gene-wise mean/std from training TPM data")
+            stacked = np.stack([v for v in self.expressions_data.values()], axis=0)
+            mean = stacked.mean(axis=0).astype(np.float32)
+            std = stacked.std(axis=0).astype(np.float32)
+
+        std[std < self._normalization_eps] = 1.0
+
+        self.gene_mean_np = mean
+        self.gene_std_np = std
+        import torch
+        self.gene_mean_tensor = torch.from_numpy(mean.copy())
+        self.gene_std_tensor = torch.from_numpy(std.copy())
+        self.normalization_stats = {'mean': mean.copy(), 'std': std.copy()}
+        print("[normalization] Gene normalization ready")
+
     def __len__(self):
         return len(self.data_keys)
 
@@ -320,6 +376,16 @@ class BulkStaticGraphDataset372(Dataset):
             expression = torch.tensor(expression, dtype=torch.float32)
         else:
             expression = torch.tensor(np.zeros(getattr(self, 'num_genes', self.original_num_genes)), dtype=torch.float32)
+        # Apply per-gene z-score normalization if configured
+        if self.apply_gene_normalization and getattr(self, 'gene_mean_tensor', None) is not None and getattr(self, 'gene_std_tensor', None) is not None:
+            gm = self.gene_mean_tensor
+            gs = self.gene_std_tensor
+            # Align lengths if needed (e.g., after gene filtering)
+            if gm.shape[0] != expression.shape[0]:
+                n = expression.shape[0]
+                gm = gm[:n]
+                gs = gs[:n]
+            expression = (expression - gm) / gs
         if not isinstance(all_cell_features, torch.Tensor):
             all_cell_features = torch.empty((0, self.feature_dim))
         if not isinstance(all_cell_positions, torch.Tensor):

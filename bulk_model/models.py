@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
+import math
 
 try:
     import torch_geometric
@@ -128,6 +129,20 @@ class OptimizedTransformerPredictor(nn.Module):
         )
 
         self.pos_encoding = nn.Parameter(torch.randn(20000, embed_dim) * 0.1)
+
+        # Gene-specific attention readout (match spatial model)
+        self.gene_queries = nn.Parameter(torch.empty(num_genes, embed_dim))
+        nn.init.xavier_uniform_(self.gene_queries)
+        self.gene_readout = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim // 2, 1),
+            nn.Softplus()
+        )
+        # Control whether forward returns gene-level predictions via attention
+        self.return_gene_level = False
 
         # Apply LoRA to selected linear modules to reduce trainable parameters
         if use_lora:
@@ -275,22 +290,47 @@ class OptimizedTransformerPredictor(nn.Module):
             return self.output_projection(x)
 
         transformer_output = checkpoint(transformer_forward, all_input, use_reentrant=False)
-        all_predictions = checkpoint(output_projection_forward, transformer_output.squeeze(0), use_reentrant=False)
 
-        results = []
-        start_idx = 0
-        for count in cell_counts:
-            if count == 0:
-                results.append(torch.zeros(1, self.output_projection[-1].out_features, device=device))
-            else:
-                graph_predictions = all_predictions[start_idx:start_idx + count]
-                results.append(graph_predictions)
-                start_idx += count
+        # By default we preserve existing behavior: return per-node predictions
+        if not getattr(self, "return_gene_level", False):
+            all_predictions = checkpoint(output_projection_forward, transformer_output.squeeze(0), use_reentrant=False)
 
-        del all_cells, all_positions, all_projected, spatial_pos_enc
-        del all_input, transformer_output, all_predictions
+            results = []
+            start_idx = 0
+            for count in cell_counts:
+                if count == 0:
+                    results.append(torch.zeros(1, self.output_projection[-1].out_features, device=device))
+                else:
+                    graph_predictions = all_predictions[start_idx:start_idx + count]
+                    results.append(graph_predictions)
+                    start_idx += count
 
-        return results
+            del all_cells, all_positions, all_projected, spatial_pos_enc
+            del all_input, transformer_output, all_predictions
+
+            return results
+        else:
+            # Alternative path: compute gene-level predictions using gene attention
+            H_all = transformer_output.squeeze(0)  # [total_cells, E]
+            results = []
+            start_idx = 0
+            for count in cell_counts:
+                if count == 0:
+                    results.append(torch.zeros(self.gene_queries.size(0), device=device))
+                else:
+                    H = H_all[start_idx:start_idx + count]  # [S, E]
+                    # compute attention logits: [G, S]
+                    attn_logits = torch.matmul(self.gene_queries, H.transpose(0, 1)) / math.sqrt(self.embed_dim)
+                    attn_weights = torch.softmax(attn_logits, dim=1)  # [G, S]
+                    Z = torch.matmul(attn_weights, H)  # [G, E]
+                    y = self.gene_readout(Z).squeeze(-1)  # [G]
+                    results.append(y)
+                    start_idx += count
+
+            del all_cells, all_positions, all_projected, spatial_pos_enc
+            del all_input, transformer_output, H_all
+
+            return results
 
     def forward_raw_features(self, all_cell_features, all_cell_positions):
         if all_cell_features.shape[0] == 0:

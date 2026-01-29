@@ -107,6 +107,17 @@ def parse_args():
                        help="禁用动态batch size搜索")
     parser.add_argument("--max-dynamic-bsz", type=int, default=8,
                        help="动态batch size搜索最大值")
+    # Gene normalization control (default: enabled)
+    group_norm = parser.add_mutually_exclusive_group()
+    group_norm.add_argument("--apply-gene-normalization", dest="apply_gene_normalization", action="store_true",
+                            help="启用基因 z-score 归一化 (默认)")
+    group_norm.add_argument("--no-gene-normalization", dest="apply_gene_normalization", action="store_false",
+                            help="禁用基因 z-score 归一化")
+    parser.set_defaults(apply_gene_normalization=True)
+
+    # Use gene-attention readout for bulk (default: False; keep original per-node path)
+    parser.add_argument("--use-gene-attention-bulk", action="store_true", default=True,
+                        help="在 bulk 模型中使用 gene-level attention 直接输出基因预测（按 WSI/患者 聚合；默认开启）")
     
     return parser.parse_args()
 
@@ -204,14 +215,21 @@ def main():
         split='train',
         selected_genes=selected_genes,
         max_samples=args.max_train_samples,
-        tpm_csv_file=args.tpm_csv_file
+        tpm_csv_file=args.tpm_cfile if False else args.tpm_csv_file,
+        apply_gene_normalization=args.apply_gene_normalization
     )
+    # If gene normalization is enabled in the training dataset, propagate stats to the test dataset
+    normalization_stats = None
+    if getattr(train_dataset, "apply_gene_normalization", False):
+        normalization_stats = getattr(train_dataset, "normalization_stats", None)
     test_dataset = BulkStaticGraphDataset372(
         graph_data_dir=args.graph_data_dir,
         split='test',
         selected_genes=selected_genes,
         max_samples=None,
-        tpm_csv_file=args.tpm_csv_file
+        tpm_csv_file=args.tpm_csv_file,
+        apply_gene_normalization=getattr(train_dataset, "apply_gene_normalization", False),
+        normalization_stats=normalization_stats
     )
     print(f"训练样本: {len(train_dataset)}, 测试样本: {len(test_dataset)}")
 
@@ -411,6 +429,13 @@ def main():
 
     optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=1e-7)
+
+    # Configure model behavior: whether to use gene-attention readout for bulk
+    if getattr(args, "use_gene_attention_bulk", False):
+        print("⚙️ 配置：bulk 使用 gene-attention readout 输出（按 WSI/患者 聚合）")
+        model.return_gene_level = True
+    else:
+        model.return_gene_level = False
 
     print(f"\n=== 训练配置（LoRA + 优化版本）===")
     print(f"图批量处理大小: {graph_batch_size}")
