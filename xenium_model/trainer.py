@@ -67,7 +67,11 @@ def train_xenium(model, node_head, train_loader, val_loader, device='cuda', num_
             for emb, idx, tgt in zip(node_embeddings_list, processed_indices, targets):
                 # emb: [S, E], tgt: [S, T]
                 emb = emb.to(device)
-                tgt = tgt.to(device)
+                # targets may be numpy arrays; convert to tensor if needed
+                if isinstance(tgt, np.ndarray):
+                    tgt = torch.from_numpy(tgt).to(device)
+                else:
+                    tgt = tgt.to(device)
                 pred = node_head(emb)  # [S, T]
                 loss = loss + criterion(pred, tgt)
                 count += 1
