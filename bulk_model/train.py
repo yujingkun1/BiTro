@@ -118,6 +118,8 @@ def parse_args():
     # Use gene-attention readout for bulk (default: False; keep original per-node path)
     parser.add_argument("--use-gene-attention-bulk", action="store_true", default=True,
                         help="在 bulk 模型中使用 gene-level attention 直接输出基因预测（按 WSI/患者 聚合；默认开启）")
+    parser.add_argument("--cluster-loss-weight", type=float, default=0.1,
+                       help="聚类损失权重 (cluster loss weight). 默认 0.1")
     
     return parser.parse_args()
 
@@ -449,7 +451,8 @@ def main():
         num_epochs=args.num_epochs, device=device, patience=args.patience,
         log_every=args.log_every, debug=args.debug_logs,
         enable_profiling=args.enable_profiling,
-        cleanup_interval=args.cleanup_interval
+        cleanup_interval=args.cleanup_interval,
+        cluster_loss_weight=args.cluster_loss_weight
     )
 
     print("\n=== 混合处理训练完成! ===")

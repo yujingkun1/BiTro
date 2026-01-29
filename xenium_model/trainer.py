@@ -109,7 +109,12 @@ def train_xenium(model, node_head, train_loader, val_loader, device='cuda', num_
                 else:
                     node_embeddings_list, processed_indices = [], []
                 for emb, idx, tgt in zip(node_embeddings_list, processed_indices, targets):
-                    emb = emb.to(device); tgt = tgt.to(device)
+                    emb = emb.to(device)
+                    # convert numpy targets to tensor if necessary
+                    if isinstance(tgt, np.ndarray):
+                        tgt = torch.from_numpy(tgt).to(device)
+                    else:
+                        tgt = tgt.to(device)
                     pred = node_head(emb)
                     val_loss += float(nn.functional.mse_loss(pred, tgt).item())
                     vcnt += 1
@@ -118,6 +123,10 @@ def train_xenium(model, node_head, train_loader, val_loader, device='cuda', num_
         print(f"Epoch {epoch+1}: Train Loss={(running/n_batches if n_batches else 0):.6f}, Val Loss={val_loss:.6f}")
         if val_loss < best_val:
             best_val = val_loss
+            # ensure parent dir exists before saving
+            save_dir = os.path.dirname(save_path) if os.path.dirname(save_path) else None
+            if save_dir:
+                os.makedirs(save_dir, exist_ok=True)
             torch.save({'model': model.state_dict(), 'node_head': node_head.state_dict()}, save_path)
             print(f"  Saved best model to {save_path}")
 

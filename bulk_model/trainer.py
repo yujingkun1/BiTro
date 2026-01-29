@@ -140,9 +140,10 @@ def load_spatial_pretrained_weights(
     return model
 
 
-def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler=None,
+def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler=None, 
                          num_epochs=50, device="cuda", patience=10, min_delta=1e-6,
-                         log_every=10, debug=False, enable_profiling=False, cleanup_interval=1):
+                         log_every=10, debug=False, enable_profiling=False, cleanup_interval=1,
+                         cluster_loss_weight: float = 0.0):
     model.to(device)
     criterion = nn.MSELoss()
     scaler = GradScaler('cuda')
@@ -173,6 +174,7 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
             
             expressions = batch['expressions'].to(device, non_blocking=True)
             spot_graphs_list = batch['spot_graphs_list']
+            cluster_labels_list = batch.get('cluster_labels_list', None)
 
             log_this_batch = (batch_idx % log_every == 0) or debug
             if log_this_batch:
@@ -181,6 +183,8 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
             optimizer.zero_grad()
 
             batch_predictions = []
+            # accumulate cluster loss for this batch across patients
+            batch_cluster_loss = 0.0
 
             for i in range(len(spot_graphs_list)):
                 spot_graphs = batch['spot_graphs_list'][i]
@@ -258,14 +262,39 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
                         else:
                             # node-level outputs: concatenate per-node predictions and sum across nodes
                             all_cell_predictions = torch.cat([pred for pred in cell_predictions_list if pred.shape[0] > 0], dim=0)
+                            # compute cluster loss on node-level predictions if cluster labels are available
+                            cluster_loss_sample = 0.0
+                            if cluster_loss_weight > 0 and cluster_labels_list is not None:
+                                try:
+                                    cl = cluster_labels_list[i]
+                                    if cl is not None:
+                                        # ensure tensor on device and length matches cells
+                                        if not isinstance(cl, torch.Tensor):
+                                            cl = torch.tensor(cl, dtype=torch.long)
+                                        cl = cl.to(device)
+                                        if cl.numel() == all_cell_predictions.shape[0]:
+                                            unique_labels = torch.unique(cl)
+                                            for label in unique_labels:
+                                                if label.item() == -1:
+                                                    continue
+                                                mask = (cl == label)
+                                                cluster_preds = all_cell_predictions[mask]
+                                                if cluster_preds.size(0) > 1:
+                                                    centroid = cluster_preds.mean(dim=0)
+                                                    distances = torch.norm(cluster_preds - centroid, dim=1)
+                                                    cluster_loss_sample += distances.mean()
+                                except Exception:
+                                    cluster_loss_sample = 0.0
                             if all_cell_predictions.shape[0] > 0:
                                 aggregated_prediction = all_cell_predictions.sum(dim=0, keepdim=True)
                                 if log_this_batch:
-                                    print(f"    患者 {i+1} 预测聚合：细胞数={all_cell_predictions.shape[0]}, 聚合结果形状={aggregated_prediction.shape}")
+                                    print(f"    患者 {i+1} 预测聚合：细胞数={all_cell_predictions.shape[0]}, 聚合结果形状={aggregated_prediction.shape}, cluster_loss_sample={cluster_loss_sample:.6f}")
                             else:
                                 aggregated_prediction = torch.zeros(1, expressions.shape[1], device=device)
                                 if log_this_batch:
                                     print(f"    患者 {i+1} 预测聚合：没有有效细胞，使用零预测")
+                            # accumulate cluster loss for batch
+                            batch_cluster_loss += cluster_loss_sample
                     else:
                         aggregated_prediction = torch.zeros(1, expressions.shape[1], device=device)
                         if log_this_batch:
@@ -293,25 +322,30 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
                 expressions = expressions[:predictions.shape[0]]
 
             with autocast('cuda'):
-                pred_sum = predictions.sum().item()
-                if pred_sum <= 1e-10 or not torch.isfinite(predictions).all():
-                    if log_this_batch:
-                        print(f"    ❌ 警告：预测异常，跳过这个batch")
-                    batch_skip_count += 1
-                    continue
+                with autocast('cuda'):
+                    pred_sum = predictions.sum().item()
+                    if pred_sum <= 1e-10 or not torch.isfinite(predictions).all():
+                        if log_this_batch:
+                            print(f"    ❌ 警告：预测异常，跳过这个batch")
+                        batch_skip_count += 1
+                        continue
 
-                epsilon = 1e-8
-                sum_pred = predictions.sum(dim=1, keepdim=True) + epsilon
-                normalized_pred = predictions / sum_pred
-                result = torch.clamp(normalized_pred * 1000000.0, min=0.0, max=1e6)
+                    epsilon = 1e-8
+                    sum_pred = predictions.sum(dim=1, keepdim=True) + epsilon
+                    normalized_pred = predictions / sum_pred
+                    result = torch.clamp(normalized_pred * 1000000.0, min=0.0, max=1e6)
 
-                if torch.isnan(result).any() or torch.isinf(result).any():
-                    if log_this_batch:
-                        print(f"    ❌ 警告：归一化结果包含NaN或Inf！跳过")
-                    batch_skip_count += 1
-                    continue
+                    if torch.isnan(result).any() or torch.isinf(result).any():
+                        if log_this_batch:
+                            print(f"    ❌ 警告：归一化结果包含NaN或Inf！跳过")
+                        batch_skip_count += 1
+                        continue
 
-                loss = criterion(result, expressions)
+                    loss = criterion(result, expressions)
+                    # add cluster loss term (weighted) aggregated across patients in this batch
+                    if cluster_loss_weight and batch_cluster_loss:
+                        # batch_cluster_loss already summed across patients
+                        loss = loss + cluster_loss_weight * batch_cluster_loss
                 if log_this_batch:
                     print(f"  计算损失：{loss.item():.6f}")
                 if torch.isnan(loss) or torch.isinf(loss):
