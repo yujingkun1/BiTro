@@ -32,6 +32,13 @@ check_environment_compatibility()
 def parse_args():
     parser = argparse.ArgumentParser(description='Bulk Model Training with LoRA and Optimizations')
     
+    # ========== 可在代码中直接修改的默认开关（在此处切换 True/False） ==========
+    # 如果你希望通过代码直接关闭/开启这些选项，请编辑下面的默认值（无需每次在命令行中传参）
+    DEFAULT_USE_GENE_ATTENTION = False
+    DEFAULT_APPLY_GENE_NORMALIZATION = False
+    DEFAULT_ENABLE_CLUSTER_LOSS = False
+    DEFAULT_CLUSTER_LOSS_WEIGHT = 0.1
+    # =====================================================================
     # 数据路径
     parser.add_argument("--graph-data-dir", type=str, 
                        default="/root/autodl-tmp/bulk_PRAD_graphs_new_all_graph",
@@ -47,18 +54,22 @@ def parse_args():
                        help="TPM表达数据CSV文件")
     
     # 训练参数
-    parser.add_argument("--batch-size", type=int, default=4,
+    parser.add_argument("--batch-size", type=int, default=2,
                        help="患者Batch Size (None=动态搜索)")
     parser.add_argument("--graph-batch-size", type=int, default=128,
                        help="图Batch Size")
-    parser.add_argument("--num-epochs", type=int, default=30,
+    parser.add_argument("--num-epochs", type=int, default=60,
                        help="训练轮数")
-    parser.add_argument("--learning-rate", type=float, default=1e-5,
+    parser.add_argument("--learning-rate", type=float, default=1e-4,
                        help="学习率")
     parser.add_argument("--weight-decay", type=float, default=1e-5,
                        help="权重衰减")
     parser.add_argument("--patience", type=int, default=15,
                        help="早停耐心值")
+    parser.add_argument("--cluster-loss-weight", type=float, default=0,
+                       help="聚类正则项权重（0表示关闭）")
+    parser.add_argument("--enable-cluster-loss", dest="enable_cluster_loss", action="store_true",
+                       help="启用 cluster loss（若不启用则忽略 cluster-loss-weight）")
 
     # 迁移学习：从 spatial 模型初始化
     parser.add_argument("--spatial-model-path", type=str, default=None,
@@ -77,6 +88,10 @@ def parse_args():
                        help="LoRA dropout")
     parser.add_argument("--lora-freeze-base", action="store_true", default=True,
                        help="冻结LoRA基础权重")
+    parser.add_argument("--use-gene-attention", dest="use_gene_attention", action="store_true",
+                       help="启用 gene attention readout（默认为代码中设置）")
+    parser.add_argument("--no-gene-attention", dest="use_gene_attention", action="store_false",
+                       help="禁用 gene attention readout")
     
     # 数据加载器优化
     parser.add_argument("--num-workers-train", type=int, default=0,
@@ -89,6 +104,8 @@ def parse_args():
                        help="启用persistent_workers")
     parser.add_argument("--prefetch-factor", type=int, default=1,
                        help="预取因子")
+    parser.add_argument("--save-normalization-stats", type=str, default=None,
+                       help="可选：训练后保存基因归一化统计(mean/std)的路径(.npz 或 .json)")
     
     # 训练优化
     parser.add_argument("--log-every", type=int, default=10,
@@ -107,20 +124,13 @@ def parse_args():
                        help="禁用动态batch size搜索")
     parser.add_argument("--max-dynamic-bsz", type=int, default=8,
                        help="动态batch size搜索最大值")
-    # Gene normalization control (default: enabled)
-    group_norm = parser.add_mutually_exclusive_group()
-    group_norm.add_argument("--apply-gene-normalization", dest="apply_gene_normalization", action="store_true",
-                            help="启用基因 z-score 归一化 (默认)")
-    group_norm.add_argument("--no-gene-normalization", dest="apply_gene_normalization", action="store_false",
-                            help="禁用基因 z-score 归一化")
-    parser.set_defaults(apply_gene_normalization=True)
-
-    # Use gene-attention readout for bulk (default: False; keep original per-node path)
-    parser.add_argument("--use-gene-attention-bulk", action="store_true", default=True,
-                        help="在 bulk 模型中使用 gene-level attention 直接输出基因预测（按 WSI/患者 聚合；默认开启）")
-    parser.add_argument("--cluster-loss-weight", type=float, default=0.1,
-                       help="聚类损失权重 (cluster loss weight). 默认 0.1")
     
+    # 设置基于代码常量的默认值（便于直接在代码中切换）
+    parser.set_defaults(use_gene_attention=DEFAULT_USE_GENE_ATTENTION)
+    parser.set_defaults(apply_gene_normalization=DEFAULT_APPLY_GENE_NORMALIZATION)
+    parser.set_defaults(enable_cluster_loss=DEFAULT_ENABLE_CLUSTER_LOSS)
+    parser.set_defaults(cluster_loss_weight=DEFAULT_CLUSTER_LOSS_WEIGHT)
+
     return parser.parse_args()
 
 
@@ -217,23 +227,38 @@ def main():
         split='train',
         selected_genes=selected_genes,
         max_samples=args.max_train_samples,
-        tpm_csv_file=args.tpm_cfile if False else args.tpm_csv_file,
-        apply_gene_normalization=args.apply_gene_normalization
+        tpm_csv_file=args.tpm_csv_file
     )
-    # If gene normalization is enabled in the training dataset, propagate stats to the test dataset
-    normalization_stats = None
-    if getattr(train_dataset, "apply_gene_normalization", False):
-        normalization_stats = getattr(train_dataset, "normalization_stats", None)
     test_dataset = BulkStaticGraphDataset372(
         graph_data_dir=args.graph_data_dir,
         split='test',
         selected_genes=selected_genes,
         max_samples=None,
-        tpm_csv_file=args.tpm_csv_file,
-        apply_gene_normalization=getattr(train_dataset, "apply_gene_normalization", False),
-        normalization_stats=normalization_stats
+        tpm_csv_file=args.tpm_csv_file
     )
     print(f"训练样本: {len(train_dataset)}, 测试样本: {len(test_dataset)}")
+
+    # 如果用户指定了保存 normalization stats 的路径，保存训练集计算的 mean/std
+    if args.save_normalization_stats:
+        try:
+            stats = getattr(train_dataset, "normalization_stats", None)
+            if stats is None:
+                # 确保训练集计算了 normalization_stats（通常会在 dataset 初始化时完成）
+                train_dataset.setup_gene_normalization()
+                stats = getattr(train_dataset, "normalization_stats", None)
+            save_path = args.save_normalization_stats
+            import numpy as _np, json as _json
+            if save_path.endswith(".json"):
+                # 转换为可序列化的列表
+                serial = {"mean": _np.asarray(stats["mean"]).tolist(), "std": _np.asarray(stats["std"]).tolist()}
+                with open(save_path, "w") as sf:
+                    _json.dump(serial, sf)
+            else:
+                # 默认保存为 npz，包含 'mean' 和 'std'
+                _np.savez_compressed(save_path, mean=_np.asarray(stats["mean"]), std=_np.asarray(stats["std"]))
+            print(f"已保存训练集 normalization stats 到: {save_path}")
+        except Exception as e:
+            print(f"⚠️ 无法保存 normalization stats: {e}")
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}")
@@ -309,6 +334,7 @@ def main():
             gnn_type='GAT',
             graph_batch_size=graph_batch_size,
             use_lora=False,  # 不使用LoRA
+            use_gene_attention=args.use_gene_attention,
             lora_r=args.lora_r,
             lora_alpha=args.lora_alpha,
             lora_dropout=args.lora_dropout,
@@ -333,6 +359,7 @@ def main():
             gnn_type='GAT',
             graph_batch_size=graph_batch_size,
             use_lora=args.use_lora,
+            use_gene_attention=args.use_gene_attention,
             lora_r=args.lora_r,
             lora_alpha=args.lora_alpha,
             lora_dropout=args.lora_dropout,
@@ -404,6 +431,7 @@ def main():
             gnn_type='GAT',
             graph_batch_size=graph_batch_size,
             use_lora=False,
+            use_gene_attention=args.use_gene_attention,
             lora_r=args.lora_r,
             lora_alpha=args.lora_alpha,
             lora_dropout=args.lora_dropout,
@@ -432,13 +460,6 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.num_epochs, eta_min=1e-7)
 
-    # Configure model behavior: whether to use gene-attention readout for bulk
-    if getattr(args, "use_gene_attention_bulk", False):
-        print("⚙️ 配置：bulk 使用 gene-attention readout 输出（按 WSI/患者 聚合）")
-        model.return_gene_level = True
-    else:
-        model.return_gene_level = False
-
     print(f"\n=== 训练配置（LoRA + 优化版本）===")
     print(f"图批量处理大小: {graph_batch_size}")
     print(f"LoRA: r={args.lora_r}, alpha={args.lora_alpha}, dropout={args.lora_dropout}, freeze_base={args.lora_freeze_base}")
@@ -446,13 +467,16 @@ def main():
     print(f"数据保留率: 100% (0%丢失)")
     print(f"日志：log_every={args.log_every}, debug={args.debug_logs}, profiling={args.enable_profiling}")
 
+    # 如果用户显式关闭 cluster loss，则传 0；否则使用提供的权重
+    cluster_weight_to_use = args.cluster_loss_weight if getattr(args, "enable_cluster_loss", False) else 0.0
+
     train_losses, test_losses = train_optimized_model(
         model, train_loader, test_loader, optimizer, scheduler,
         num_epochs=args.num_epochs, device=device, patience=args.patience,
         log_every=args.log_every, debug=args.debug_logs,
         enable_profiling=args.enable_profiling,
         cleanup_interval=args.cleanup_interval,
-        cluster_loss_weight=args.cluster_loss_weight
+        cluster_loss_weight=cluster_weight_to_use
     )
 
     print("\n=== 混合处理训练完成! ===")

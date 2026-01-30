@@ -88,7 +88,8 @@ class OptimizedTransformerPredictor(nn.Module):
                  lora_r: int = 8,
                  lora_alpha: int = 16,
                  lora_dropout: float = 0.05,
-                 lora_freeze_base: bool = True):
+                lora_freeze_base: bool = True,
+                use_gene_attention: bool = True):
 
         super(OptimizedTransformerPredictor, self).__init__()
         self.use_gnn = use_gnn and GNN_AVAILABLE
@@ -131,18 +132,25 @@ class OptimizedTransformerPredictor(nn.Module):
         self.pos_encoding = nn.Parameter(torch.randn(20000, embed_dim) * 0.1)
 
         # Gene-specific attention readout (match spatial model)
-        self.gene_queries = nn.Parameter(torch.empty(num_genes, embed_dim))
-        nn.init.xavier_uniform_(self.gene_queries)
-        self.gene_readout = nn.Sequential(
-            nn.LayerNorm(embed_dim),
-            nn.Linear(embed_dim, embed_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(embed_dim // 2, 1),
-            nn.Softplus()
-        )
+        # Only create attention params when enabled to preserve compatibility with checkpoints
+        if use_gene_attention:
+            self.gene_queries = nn.Parameter(torch.empty(num_genes, embed_dim))
+            nn.init.xavier_uniform_(self.gene_queries)
+            self.gene_readout = nn.Sequential(
+                nn.LayerNorm(embed_dim),
+                nn.Linear(embed_dim, embed_dim // 2),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(embed_dim // 2, 1),
+                nn.Softplus()
+            )
+        else:
+            # ensure attributes exist but not registered parameters
+            self.gene_queries = None
+            self.gene_readout = None
         # Control whether forward returns gene-level predictions via attention
-        self.return_gene_level = False
+        # This can be configured at construction time so training/evaluation can match behavior
+        self.return_gene_level = bool(use_gene_attention)
 
         # Apply LoRA to selected linear modules to reduce trainable parameters
         if use_lora:

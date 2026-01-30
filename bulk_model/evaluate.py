@@ -28,10 +28,16 @@ from bulk_model.models import OptimizedTransformerPredictor
 
 def parse_args():
     parser = argparse.ArgumentParser(description="评估 bulk 模型在测试集上的性能")
+    # ========== 可在代码中直接修改的默认开关（在此处切换 True/False） ==========
+    DEFAULT_USE_GENE_ATTENTION = False
+    DEFAULT_APPLY_GENE_NORMALIZATION = False
+    DEFAULT_ENABLE_CLUSTER_LOSS = False
+    DEFAULT_CLUSTER_LOSS_WEIGHT = 0.0
+    # =====================================================================
     parser.add_argument(
         "--model-path",
         type=str,
-        default="/root/autodl-tmp/Cell2Gene/best_PRAD_lora_model_cluster_norm_attention.pt",
+        default="/root/autodl-tmp/Cell2Gene/best_PRAD_lora_model.pt",
         help="模型检查点路径",
     )
     parser.add_argument(
@@ -83,6 +89,8 @@ def parse_args():
         default=None,
         help="设备 (例如: cuda:0). 默认自动选择",
     )
+    parser.add_argument("--debug-logs", action="store_true", default=False,
+                        help="启用调试日志，打印样本级预测统计信息")
     parser.add_argument(
         "--use-lora",
         action="store_true",
@@ -131,7 +139,21 @@ def parse_args():
                             help="启用基因 z-score 归一化 (默认)")
     group_norm.add_argument("--no-gene-normalization", dest="apply_gene_normalization", action="store_false",
                             help="禁用基因 z-score 归一化")
-    parser.set_defaults(apply_gene_normalization=True)
+    # gene attention flags
+    parser.add_argument("--use-gene-attention", dest="use_gene_attention", action="store_true",
+                        help="启用 gene attention readout（默认为代码中设置）")
+    parser.add_argument("--no-gene-attention", dest="use_gene_attention", action="store_false",
+                        help="禁用 gene attention readout")
+    # cluster loss flags (主要用于训练，但在这里保留为配置一致)
+    parser.add_argument("--enable-cluster-loss", dest="enable_cluster_loss", action="store_true",
+                        help="评估时是否启用 cluster loss（通常不启用，仅用于一致性）")
+    parser.add_argument("--cluster-loss-weight", type=float, default=0.0,
+                        help="聚类正则项权重（仅在 enable-cluster-loss=True 时生效）")
+    # set defaults from code-level constants
+    parser.set_defaults(use_gene_attention=DEFAULT_USE_GENE_ATTENTION)
+    parser.set_defaults(apply_gene_normalization=DEFAULT_APPLY_GENE_NORMALIZATION)
+    parser.set_defaults(enable_cluster_loss=DEFAULT_ENABLE_CLUSTER_LOSS)
+    parser.set_defaults(cluster_loss_weight=DEFAULT_CLUSTER_LOSS_WEIGHT)
     parser.add_argument("--normalization-stats", type=str, default=None,
                         help="可选：归一化统计文件（JSON或npz）路径，包含 mean/std，用于非训练split时提供stats")
     return parser.parse_args()
@@ -289,27 +311,79 @@ def evaluate():
     if not selected_genes:
         raise RuntimeError("加载基因映射失败，请检查输入文件")
 
-    # Load normalization stats if provided (for test split)
+    # Load or compute normalization stats (for evaluation on non-train split)
     normalization_stats = None
     if args.apply_gene_normalization:
-        if args.split != 'train':
-            if args.normalization_stats is None:
-                raise ValueError("当在非训练集上启用基因归一化时，必须通过 --normalization-stats 提供训练集计算的 mean/std")
+        import numpy as _np
+        # If evaluating on non-train split and no stats provided, try to compute from training split
+        if args.split != "train" and args.normalization_stats is None:
+            print("[评估] 未提供 --normalization-stats，尝试从训练集计算 mean/std（这可能需要一些时间）...")
+            try:
+                train_dataset = BulkStaticGraphDataset372(
+                    graph_data_dir=args.graph_data_dir,
+                    split="train",
+                    selected_genes=selected_genes,
+                    max_samples=None,
+                    tpm_csv_file=args.tpm_csv_file,
+                    apply_gene_normalization=False,
+                    normalization_stats=None,
+                )
+                train_loader = DataLoader(
+                    train_dataset,
+                    batch_size=args.batch_size or 1,
+                    shuffle=False,
+                    collate_fn=collate_fn_bulk_372,
+                    num_workers=0,
+                    pin_memory=False,
+                )
+
+                # Welford 在线计算 mean/std，按基因维度（与 dataset.setup_gene_normalization 行为一致）
+                count = 0
+                mean = None
+                M2 = None
+                for b in train_loader:
+                    exprs = b["expressions"]  # torch.Tensor, shape (B, num_genes)
+                    arr = exprs.detach().cpu().numpy()
+                    if mean is None:
+                        mean = _np.zeros(arr.shape[1], dtype=_np.float64)
+                        M2 = _np.zeros(arr.shape[1], dtype=_np.float64)
+                    for row in arr:
+                        count += 1
+                        delta = row - mean
+                        mean += delta / count
+                        delta2 = row - mean
+                        M2 += delta * delta2
+
+                if count == 0:
+                    raise RuntimeError("训练集为空，无法计算 normalization stats")
+                variance = M2 / count
+                std = _np.sqrt(variance)
+
+                # 与 dataset.setup_gene_normalization 保持一致：对过小的 std 使用 1.0 防止除零
+                eps = getattr(train_dataset, "_normalization_eps", 1e-6)
+                std = _np.asarray(std, dtype=_np.float32)
+                std[std < eps] = 1.0
+                mean = _np.asarray(mean, dtype=_np.float32)
+
+                normalization_stats = {"mean": mean.tolist(), "std": std.tolist()}
+                print(f"[评估] 从训练集计算 normalization_stats 完成（样本数={count}）")
+            except Exception as e:
+                print(f"[评估] 无法从训练集计算 normalization_stats: {e}。将禁用基因归一化。")
+                args.apply_gene_normalization = False
+        elif args.normalization_stats is not None:
             # load JSON or npz
             import json
-            import numpy as _np
             stats_path = args.normalization_stats
             if stats_path.endswith(".json"):
-                with open(stats_path, 'r') as sf:
+                with open(stats_path, "r") as sf:
                     normalization_stats = json.load(sf)
             else:
                 try:
                     arr = _np.load(stats_path, allow_pickle=True)
-                    if isinstance(arr, dict) and 'mean' in arr and 'std' in arr:
-                        normalization_stats = {'mean': _np.asarray(arr['mean']).tolist(), 'std': _np.asarray(arr['std']).tolist()}
+                    if isinstance(arr, dict) and "mean" in arr and "std" in arr:
+                        normalization_stats = {"mean": _np.asarray(arr["mean"]).tolist(), "std": _np.asarray(arr["std"]).tolist()}
                     else:
-                        # try reading as npz with arrays 'mean' and 'std'
-                        normalization_stats = {'mean': _np.asarray(arr['mean']).tolist(), 'std': _np.asarray(arr['std']).tolist()}
+                        normalization_stats = {"mean": _np.asarray(arr["mean"]).tolist(), "std": _np.asarray(arr["std"]).tolist()}
                 except Exception as e:
                     raise ValueError(f"无法加载 normalization_stats 文件: {e}")
 
@@ -345,6 +419,7 @@ def evaluate():
         gnn_type='GAT',
         graph_batch_size=args.graph_batch_size,
         use_lora=args.use_lora,
+        use_gene_attention=args.use_gene_attention,
         lora_r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
@@ -353,13 +428,35 @@ def evaluate():
     
     print(f"[评估] 加载模型: {args.model_path}")
     state_dict = torch.load(args.model_path, map_location=device)
-    model.load_state_dict(state_dict)
+    # 尝试非严格加载以兼容可能缺失/多余的参数（例如 gene attention 开关差异）
+    missing = None
+    try:
+        load_res = model.load_state_dict(state_dict, strict=False)
+        # load_state_dict 返回一个 NamedTuple，有 missing_keys/unexpected_keys (PyTorch >=1.9)
+        missing = getattr(load_res, "missing_keys", None)
+        unexpected = getattr(load_res, "unexpected_keys", None)
+        if missing:
+            print(f"[评估] 加载模型时缺少参数（可能因为构造时关闭了某些功能）：{missing}")
+        if unexpected:
+            print(f"[评估] 加载模型时发现未使用的参数：{unexpected}")
+    except TypeError:
+        # 旧版返回 dict 或抛异常，降级为旧式不严格加载
+        try:
+            model.load_state_dict(state_dict)
+        except RuntimeError as e:
+            # 最后回退：尝试剥离 checkpoint 中多余的模块键（例如保存时包含 'model' 字段）
+            if isinstance(state_dict, dict) and 'model' in state_dict and isinstance(state_dict['model'], dict):
+                print("[评估] 检测到 checkpoint 包含 'model' 字段，尝试使用 state_dict['model']")
+                model.load_state_dict(state_dict['model'], strict=False)
+            else:
+                raise
     model.to(device)
     model.eval()
 
     per_sample_metrics: List[Dict] = []
     all_target_vectors: List[np.ndarray] = []
     all_prediction_vectors: List[np.ndarray] = []
+    all_target_vectors_raw: List[np.ndarray] = []
 
     print(f"[评估] 开始评估 {args.split} 集...")
     with torch.no_grad():
@@ -419,8 +516,31 @@ def evaluate():
                 pred_np = scaled_pred[sample_idx].detach().cpu().numpy()
                 target_np = targets[sample_idx].detach().cpu().numpy()
 
+                # 获取原始 TPM（未经 z-score 归一化）以计算原始样本间相关性
+                try:
+                    patient_id_for_raw = batch_patient_ids[sample_idx]
+                    raw_target_np = dataset.expressions_data.get(patient_id_for_raw, None)
+                    if raw_target_np is None:
+                        # 有些数据使用 slide->patient mapping；尝试使用 slide id
+                        slide_for_raw = batch_slide_ids[sample_idx]
+                        mapped_pid = dataset.slide_to_patient_mapping.get(slide_for_raw, None) if hasattr(dataset, 'slide_to_patient_mapping') else None
+                        raw_target_np = dataset.expressions_data.get(mapped_pid, None) if mapped_pid is not None else None
+                    if raw_target_np is not None:
+                        raw_target_np = np.asarray(raw_target_np, dtype=np.float64)
+                    else:
+                        raw_target_np = None
+                except Exception:
+                    raw_target_np = None
+
                 pearson_val = compute_pearson(pred_np, target_np)
                 js_val = js_divergence(pred_np, target_np)
+
+                # Optional debug logging for per-sample prediction stats
+                if args.debug_logs and (len(per_sample_metrics) < 10):
+                    raw_pred = predictions[sample_idx].detach().cpu().numpy()
+                    ssum = raw_pred.sum()
+                    top_idx = np.argsort(raw_pred)[-5:][::-1]
+                    print(f"[debug] sample={batch_slide_ids[sample_idx]} sum={ssum:.3f} min={raw_pred.min():.6f} max={raw_pred.max():.6f} top5={top_idx.tolist()}")
 
                 per_sample_metrics.append(
                     {
@@ -432,6 +552,8 @@ def evaluate():
                 )
                 all_prediction_vectors.append(pred_np)
                 all_target_vectors.append(target_np)
+                if raw_target_np is not None:
+                    all_target_vectors_raw.append(raw_target_np)
 
             if (batch_idx + 1) % 10 == 0:
                 print(f"  已处理 {batch_idx + 1} 个批次...")
@@ -450,7 +572,12 @@ def evaluate():
     print("\n" + "="*60)
     print("=== 评估结果汇总 ===")
     print("="*60)
-    target_target_avg = average_pairwise_pearson(all_target_vectors)
+    # 计算两套平均 Pearson：一是基于原始 TPM（如果可用），一是基于脚本内部用于比较的 target vectors（可能已归一化）
+    target_target_avg = float("nan")
+    if all_target_vectors_raw:
+        target_target_avg = average_pairwise_pearson(all_target_vectors_raw)
+    else:
+        target_target_avg = average_pairwise_pearson(all_target_vectors)
     pred_pred_avg = average_pairwise_pearson(all_prediction_vectors)
     target_target_js = average_pairwise_js(all_target_vectors)
     pred_pred_js = average_pairwise_js(all_prediction_vectors)
