@@ -11,4 +11,5 @@
 *.tif
 *.pkl
 *.gz
+*.zip
 *__pycache__

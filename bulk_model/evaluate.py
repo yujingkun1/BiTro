@@ -125,6 +125,15 @@ def parse_args():
         default=None,
         help="可选的最大样本数限制（用于调试）",
     )
+    # Gene normalization control (default: enabled)
+    group_norm = parser.add_mutually_exclusive_group()
+    group_norm.add_argument("--apply-gene-normalization", dest="apply_gene_normalization", action="store_true",
+                            help="启用基因 z-score 归一化 (默认)")
+    group_norm.add_argument("--no-gene-normalization", dest="apply_gene_normalization", action="store_false",
+                            help="禁用基因 z-score 归一化")
+    parser.set_defaults(apply_gene_normalization=True)
+    parser.add_argument("--normalization-stats", type=str, default=None,
+                        help="可选：归一化统计文件（JSON或npz）路径，包含 mean/std，用于非训练split时提供stats")
     return parser.parse_args()
 
 
@@ -280,12 +289,38 @@ def evaluate():
     if not selected_genes:
         raise RuntimeError("加载基因映射失败，请检查输入文件")
 
+    # Load normalization stats if provided (for test split)
+    normalization_stats = None
+    if args.apply_gene_normalization:
+        if args.split != 'train':
+            if args.normalization_stats is None:
+                raise ValueError("当在非训练集上启用基因归一化时，必须通过 --normalization-stats 提供训练集计算的 mean/std")
+            # load JSON or npz
+            import json
+            import numpy as _np
+            stats_path = args.normalization_stats
+            if stats_path.endswith(".json"):
+                with open(stats_path, 'r') as sf:
+                    normalization_stats = json.load(sf)
+            else:
+                try:
+                    arr = _np.load(stats_path, allow_pickle=True)
+                    if isinstance(arr, dict) and 'mean' in arr and 'std' in arr:
+                        normalization_stats = {'mean': _np.asarray(arr['mean']).tolist(), 'std': _np.asarray(arr['std']).tolist()}
+                    else:
+                        # try reading as npz with arrays 'mean' and 'std'
+                        normalization_stats = {'mean': _np.asarray(arr['mean']).tolist(), 'std': _np.asarray(arr['std']).tolist()}
+                except Exception as e:
+                    raise ValueError(f"无法加载 normalization_stats 文件: {e}")
+
     dataset = BulkStaticGraphDataset372(
         graph_data_dir=args.graph_data_dir,
         split=args.split,
         selected_genes=selected_genes,
         max_samples=args.max_samples,
-        tpm_csv_file=args.tpm_csv_file
+        tpm_csv_file=args.tpm_csv_file,
+        apply_gene_normalization=args.apply_gene_normalization,
+        normalization_stats=normalization_stats
     )
 
     data_loader = DataLoader(
