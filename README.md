@@ -1,65 +1,11 @@
-## CIGAR: Cell-to-Gene Prediction from Pathology Images via Transfer Learning Across Bulk and Spatial Transcriptomics
+## BiTro: Bidirectional Transfer Learning Enhances Bulk and Spatial Transcriptomics Prediction in Cancer Pathological Images
 
-CIGAR is a modular pipeline for **predicting spatial gene expression from histology images** using **cell-level graphs**, **Graph Neural Networks (GNNs)** and **Transformers**.  
+BiTro is a modular pipeline for **predicting spatial gene expression from histology images** using **cell-level graphs**, **Graph Neural Networks (GNNs)** and **Transformers**.  
 The project supports both **spatial transcriptomics (HEST)** and **bulk RNA‑seq** settings, with optional **transfer learning from bulk models to spatial models**.
 
 ---
 
-## 1. Features
-
-- **Spatial model (HEST)**
-  - Cell‑level feature extraction from histology using DINOv3.
-  - Spatial graph construction (intra‑patch and inter‑patch cell graphs).
-  - GNN + Transformer architecture for spot‑level gene expression prediction.
-  - Supports **k‑fold** and **leave‑one‑out (LOO)** cross‑validation.
-
-- **Bulk model**
-  - Preprocessing pipeline from WSI → patches → cell graphs.
-  - Bulk‑level gene expression prediction using graph‑based models.
-
-- **Transfer learning**
-  - Load a pretrained bulk model as backbone for spatial models.
-  - Flexible configuration via environment variables / command‑line.
-
-- **Evaluation & visualization**
-  - Per‑gene and per‑spot Pearson correlation metrics.
-  - Training curves, gene‑wise correlation histograms.
-  - Aggregated statistics across folds (JSON + plots).
-
----
-
-## 2. Repository Structure (Key Components)
-
-- **`spitial_model/`**  
-  - `train.py`: main training script for the HEST spatial model (supports CV, optional transfer learning).  
-  - `dataset.py`: `HESTSpatialDataset`, data loading & normalization.  
-  - `models/`: GNN, Transformer, and LoRA‑related model definitions.  
-  - `trainer.py`: training loop, optimizer/scheduler setup, early stopping.  
-  - `utils.py`: fold sampling, evaluation, plotting, and IO utilities.
-
-- **`bulk_model/`**  
-  - `pre_processing/`: WSI selection, patch feature extraction, normalization.  
-  - `train.py`: training script for the bulk model.  
-  - `dataset.py`, `models.py`, `trainer.py`, `utils.py`: bulk‑side counterparts.
-
-- **`utils/`**
-  - `extract_spatial_features_dinov3.py`: extract DINOv3 features for spatial data.  
-  - `spatial_graph_construction.py`: build cell graphs for HEST.  
-  - `bulk_graph_construction.py`: build cell graphs for bulk RNA‑seq.
-
-- **`infer_spatial_on_bulk/`**
-  - `infer.py`: infer spatial‑like predictions on bulk data using trained models.
-
-- **`log_*` / `log_normalized*` / `cscc_normalized/`**  
-  Output directories for different experiments (datasets, learning rates, gene sets, etc.), including:
-  - Fold‑wise metrics (`fold_x_metrics.txt`, `fold_x_epoch_metrics.json`)  
-  - Per‑fold predictions/targets (`.npy`)  
-  - Best Pearson summaries (`fold_best_pearsons.json`, `final_loo_best_pearsons.json`)  
-  - Plots (training curves, gene correlation histograms, across‑fold Pearson plots)
-
----
-
-## 3. Installation
+## 1. Installation
 
 Create a conda or virtualenv environment and install the required packages:
 
@@ -88,11 +34,11 @@ You will also need:
 
 ---
 
-## 4. Spatial Model Pipeline (HEST)
+## 2. Spatial Model Pipeline (HEST)
 
 The HEST dataset is already preprocessed at the expression level. We only need to normalize histology images (e.g. Vahadane) and extract features before graph construction and training.
 
-### 4.1. Extract cell‑level spatial features
+### 2.1. Extract cell‑level spatial features
 
 ```bash
 cd /data/yujk/hovernet2feature/Cell2Gene
@@ -104,7 +50,7 @@ This script:
 - Applies stain normalization (Vahadane).
 - Extracts DINOv3 features for each cell / patch and stores them to disk.
 
-### 4.2. Construct spatial graphs
+### 2.2. Construct spatial graphs
 
 ```bash
 python utils/spatial_graph_construction.py
@@ -114,7 +60,7 @@ This script:
 - Builds intra‑patch and inter‑patch graphs between cells.
 - Saves graph structures (edges, node features, metadata) for training.
 
-### 4.3. Train the spatial model
+### 2.3. Train the spatial model
 
 ```bash
 cd /data/yujk/hovernet2feature/Cell2Gene
@@ -128,11 +74,11 @@ Key notes:
 
 ---
 
-## 5. Bulk Model Pipeline
+## 3. Bulk Model Pipeline
 
 The bulk model is trained on WSI‑level graphs to predict bulk RNA‑seq expression and can later be used for transfer learning to spatial models.
 
-### 5.1. Bulk data preprocessing
+### 3.1. Bulk data preprocessing
 
 ```bash
 cd /data/yujk/hovernet2feature/Cell2Gene
@@ -147,7 +93,7 @@ These scripts:
 - Extract patch‑level features for each WSI.
 - Normalize patch features for stability.
 
-### 5.2. Cell segmentation using CellViT
+### 3.2. Cell segmentation using CellViT
 
 ```bash
 CellViT-inference --config-dir cellVit.yaml
@@ -155,7 +101,7 @@ CellViT-inference --config-dir cellVit.yaml
 
 This produces cell segmentation masks / instances that will be used for cell‑level graphs.
 
-### 5.3. Extract cell features for bulk WSIs
+### 3.3. Extract cell features for bulk WSIs
 
 ```bash
 python utils/extract_spatial_features_dinov3.py
@@ -163,7 +109,7 @@ python utils/extract_spatial_features_dinov3.py
 
 Reuses the DINOv3 extractor to produce features for segmented cells in bulk WSIs.
 
-### 5.4. Construct cell graphs for bulk data
+### 3.4. Construct cell graphs for bulk data
 
 ```bash
 python utils/bulk_graph_construction.py
@@ -173,7 +119,7 @@ This script:
 - Constructs cell‑level graphs for bulk WSIs.
 - Saves graph data and mappings (`bulk_*_all_cell_features.pkl`, `bulk_*_intra_patch_graphs.pkl`, etc.).
 
-### 5.5. Train the bulk model
+### 3.5. Train the bulk model
 
 ```bash
 cd /data/yujk/hovernet2feature/Cell2Gene
@@ -186,7 +132,7 @@ This will:
 
 ---
 
-## 6. Transfer Learning (Optional)
+## 4. Transfer Learning (Optional)
 
 > Note: You can also train purely from scratch without transfer learning by
 > disabling the corresponding flags in `spitial_model/train.py`.
@@ -222,7 +168,7 @@ You can also expose these as command‑line arguments if desired (see comments i
 
 ---
 
-## 7. Model Architecture (Spatial Model)
+## 5. Model Architecture (Spatial Model)
 
 The spatial model (in `spitial_model/models/`) follows a **GNN + Transformer** design:
 
@@ -245,7 +191,7 @@ The bulk model uses a related graph‑based architecture adapted to WSI‑level 
 
 ---
 
-## 8. Configuration & Environment Variables
+## 6. Configuration & Environment Variables
 
 Key hyperparameters and options for the spatial model are defined in `spitial_model/train.py`:
 
@@ -276,7 +222,7 @@ You can either:
 
 ---
 
-## 9. Outputs & Metrics
+## 7. Outputs & Metrics
 
 For each experiment (e.g. under `log_normalized_BRCA_1e-3/` or similar), the code saves:
 
@@ -296,7 +242,7 @@ These files allow quick comparison across hyperparameters, gene sets, and model 
 
 ---
 
-## 10. Requirements Summary
+## 8. Requirements Summary
 
 - **Core**
   - PyTorch
@@ -316,17 +262,10 @@ Make sure CUDA / GPU drivers are properly configured if you plan to train large 
 
 ---
 
-## 11. Citation
-
-If you use this codebase or ideas in your work, please consider citing the corresponding thesis / paper (to be added once available).
-
----
-
 ## 12. Contact
 
 For questions or collaborations, please contact the author:
 
 - **Author**: Jingkun Yu  
-- **Project root**: `/data/yujk/hovernet2feature/Cell2Gene`
 
 Feel free to open issues or propose improvements based on your own datasets and experiments.
