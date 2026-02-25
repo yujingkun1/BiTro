@@ -5,7 +5,7 @@ The project supports both **spatial transcriptomics (HEST)** and **bulk RNA‑se
 
 ---
 
-**The code is currently in the process of being refined and improved. In the future, an ipynb file of detailed whole process will be added.**
+**The code is currently in the process of being refined and improved. In the future, an ipynb file of detailed whole process will be added with demo data.**
 
 ---
 
@@ -116,7 +116,7 @@ Example (using environment variables):
 
 export OUTPUT_DIR=./log_normalized_BRCA_transfer
 export USE_TRANSFER_LEARNING=true
-export BULK_MODEL_PATH=/data/yujk/hovernet2feature/best_bulk_static_372_optimized_model.pt
+export BULK_MODEL_PATH=/bulk_model.pt
 export FREEZE_BACKBONE=false        # or true depending on your strategy
 
 python spitial_model/train.py
