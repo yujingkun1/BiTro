@@ -1,3 +1,16 @@
+"""
+Utility helpers for the bulk model training pipeline.
+
+This module provides:
+- Environment and dependency checks
+- CPU/GPU memory usage helpers
+- Gene list / mapping utilities
+
+Note:
+    Some functions are duplicated for backward compatibility with earlier scripts.
+    The last definition in the file takes precedence in Python.
+"""
+
 import os
 import sys
 import json
@@ -12,31 +25,32 @@ warnings.filterwarnings("ignore", category=UserWarning, module="torch.nn.modules
 
 
 def check_environment_compatibility():
-    print("=== 环境兼容性检查 ===")
+    """Print a lightweight environment compatibility report."""
+    print("=== Environment compatibility check ===")
     python_version = sys.version_info
     required_python = (3, 12, 9)
     if python_version[:3] >= required_python:
-        print(f"✅ Python版本: {python_version.major}.{python_version.minor}.{python_version.micro} (要求: {'.'.join(map(str, required_python))})")
+        print(f"✓ Python: {python_version.major}.{python_version.minor}.{python_version.micro} (required: {'.'.join(map(str, required_python))})")
     else:
-        print(f"⚠️ Python版本过低: {python_version.major}.{python_version.minor}.{python_version.micro} (要求: {'.'.join(map(str, required_python))})")
+        print(f"Warning: Python version too low: {python_version.major}.{python_version.minor}.{python_version.micro} (required: {'.'.join(map(str, required_python))})")
 
     try:
         torch_version = torch.__version__
-        print(f"✅ PyTorch版本: {torch_version}")
+        print(f"✓ PyTorch: {torch_version}")
         if torch.cuda.is_available():
             cuda_version = torch.version.cuda
             gpu_count = torch.cuda.device_count()
             gpu_name = torch.cuda.get_device_name(0) if gpu_count > 0 else "Unknown"
-            print(f"✅ CUDA版本: {cuda_version}")
-            print(f"✅ GPU设备: {gpu_count}个 - {gpu_name}")
+            print(f"✓ CUDA: {cuda_version}")
+            print(f"✓ GPU: {gpu_count} device(s) - {gpu_name}")
             if torch.backends.cudnn.is_available():
-                print(f"✅ cuDNN版本: {torch.backends.cudnn.version()}")
+                print(f"✓ cuDNN: {torch.backends.cudnn.version()}")
             else:
-                print("⚠️ cuDNN不可用")
+                print("Warning: cuDNN is not available")
         else:
-            print("⚠️ CUDA不可用，将使用CPU模式")
+            print("Warning: CUDA is not available; using CPU mode")
     except Exception as e:
-        print(f"❌ PyTorch环境检查失败: {e}")
+        print(f"Error: PyTorch environment check failed: {e}")
 
     dependencies = {
         'numpy': '2.2.4',
@@ -49,11 +63,11 @@ def check_environment_compatibility():
         try:
             module = __import__(package)
             actual_version = getattr(module, '__version__', 'Unknown')
-            print(f"✅ {package}: {actual_version} (期望: {expected_version})")
+            print(f"✓ {package}: {actual_version} (expected: {expected_version})")
         except ImportError:
-            print(f"❌ {package}: 未安装")
+            print(f"Error: {package} is not installed")
 
-    print("=== 环境检查完成 ===\n")
+    print("=== Environment check complete ===\n")
 
 
 def get_memory_usage():
@@ -82,7 +96,13 @@ import torch
 
 
 def get_memory_usage():
-    """获取当前内存和GPU内存使用情况（与原脚本一致）"""
+    """Get current CPU and GPU memory usage (percentage).
+
+    Returns:
+        A tuple ``(cpu_percent, gpu_percent)`` where:
+        - ``cpu_percent`` is the system RAM usage percentage.
+        - ``gpu_percent`` is the estimated GPU memory usage percentage.
+    """
     cpu_memory = psutil.virtual_memory().percent
     gpu_memory = 0
     if torch.cuda.is_available():
@@ -97,22 +117,35 @@ def get_memory_usage():
 
 
 def safe_memory_cleanup():
-    """安全的内存清理（与原脚本一致）"""
+    """Run garbage collection and clear CUDA cache (if available)."""
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
 
 def load_gene_mapping(gene_list_file, features_file):
-    """加载基因映射：从基因名称到ENS ID（从原脚本迁移）"""
-    print("=== 加载基因映射 ===")
+    """Load a gene mapping from gene symbol to Ensembl ID.
+
+    Args:
+        gene_list_file: Path to a text file containing target gene symbols
+            (one per line).
+        features_file: Path to a TSV mapping file. The first two columns are
+            expected to be ``ens_id`` and ``gene_symbol``.
+
+    Returns:
+        A tuple ``(selected_ens_genes, gene_name_to_ens)`` where:
+        - ``selected_ens_genes`` is a list of Ensembl IDs corresponding to the
+          target symbols found in ``features_file``.
+        - ``gene_name_to_ens`` is a dict mapping gene symbol -> Ensembl ID.
+    """
+    print("=== Loading gene mapping ===")
     target_genes = set()
     with open(gene_list_file, 'r') as f:
         for line in f:
             gene = line.strip()
             if gene and not gene.startswith('Efficiently') and not gene.startswith('Total') and not gene.startswith('Detection') and not gene.startswith('Samples'):
                 target_genes.add(gene)
-    print(f"目标基因数量: {len(target_genes)}")
+    print(f"Target genes: {len(target_genes)}")
 
     gene_name_to_ens = {}
     if os.path.exists(features_file):
@@ -129,7 +162,7 @@ def load_gene_mapping(gene_list_file, features_file):
         if gene_name in gene_name_to_ens:
             selected_ens_genes.append(gene_name_to_ens[gene_name])
 
-    print(f"成功映射基因数量: {len(selected_ens_genes)}")
+    print(f"Mapped genes: {len(selected_ens_genes)}")
     return selected_ens_genes, gene_name_to_ens
 
 

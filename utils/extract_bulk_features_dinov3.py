@@ -90,20 +90,20 @@ def worker_initializer(device_queue):
 if __name__ == "__main__":
     set_start_method('spawn', force=True)
 
-# 设置HuggingFace镜像（用于中国网络环境）
+# Configure an optional HuggingFace endpoint mirror (useful in some networks).
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-print(f"已设置HuggingFace镜像: {os.environ.get('HF_ENDPOINT')}")
+print(f"Using HuggingFace endpoint: {os.environ.get('HF_ENDPOINT')}")
 
-# DINOv3模型导入
+# DINOv3 / transformers availability.
 try:
     import transformers
     from transformers import AutoModel, AutoImageProcessor
     DINOV3_AVAILABLE = True
-    print("✓ DINOv3可用")
+    print("✓ DINOv3 available")
 except ImportError as e:
     DINOV3_AVAILABLE = False
-    print(f"错误: 请安装transformers库: pip install transformers")
-    print(f"详细错误: {e}")
+    print("Error: please install transformers (pip install transformers)")
+    print(f"Details: {e}")
 
 # Configure logging
 logging.basicConfig(filename='feature_extraction.log', level=logging.INFO,
@@ -195,14 +195,14 @@ def extract_features_for_image(args):
                     torch.cuda.set_device(device_id)
                     with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
                         batch_features = model(input_tensor)
-                        # 如果返回的是tuple，取第一个元素
+                        # If the model returns a tuple, take the first element.
                         if isinstance(batch_features, tuple):
                             batch_features = batch_features[0]
-                        # 如果是4D tensor (batch, channels, height, width)，取global average pooling
+                        # If features are 4D (B, C, H, W), apply global average pooling.
                         if len(batch_features.shape) == 4:
                             batch_features = batch_features.mean(dim=[2, 3])  # Global average pooling
                         elif len(batch_features.shape) == 3:
-                            batch_features = batch_features.mean(dim=1)  # 平均token特征
+                            batch_features = batch_features.mean(dim=1)  # Mean token features.
                         features = batch_features.squeeze().flatten().detach().cpu().numpy()
                 else:
                     batch_features = model(input_tensor)
@@ -214,7 +214,7 @@ def extract_features_for_image(args):
                         batch_features = batch_features.mean(dim=1)
                     features = batch_features.squeeze().flatten().cpu().numpy()
                 
-                # 检查并清理NaN/Inf值
+                # Clean NaN/Inf values (defensive).
                 if np.isnan(features).any() or np.isinf(features).any():
                     features = np.nan_to_num(features, nan=0.0, posinf=1.0, neginf=-1.0)
                 
@@ -238,70 +238,70 @@ def extract_features_for_image(args):
 def get_feature_extractor(model_name):
     """Return a DinoV3 feature extractor model and its feature dimension."""
     if not DINOV3_AVAILABLE:
-        raise ImportError("DINOv3不可用，请安装transformers")
+        raise ImportError("DINOv3 is not available; please install transformers")
     
-    # 设置 DINOv3 模型路径
+    # DINOv3 local model/repo paths.
     dinov3_model_path = "/data/yujk/hovernet2feature/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
     dinov3_repo_dir = "/data/yujk/hovernet2feature/dinov3"
     
     if not os.path.exists(dinov3_model_path):
-        raise RuntimeError(f"DINOv3模型文件不存在: {dinov3_model_path}")
+        raise RuntimeError(f"DINOv3 model file not found: {dinov3_model_path}")
     
     if not os.path.exists(dinov3_repo_dir):
-        raise RuntimeError(f"DINOv3仓库不存在: {dinov3_repo_dir}")
+        raise RuntimeError(f"DINOv3 repository not found: {dinov3_repo_dir}")
     
-    print(f"使用DINOv3仓库: {dinov3_repo_dir}")
-    print(f"使用本地DINOv3模型: {dinov3_model_path}")
+    print(f"Using DINOv3 repository: {dinov3_repo_dir}")
+    print(f"Using local DINOv3 weights: {dinov3_model_path}")
     
     try:
-        # 使用 torch.hub.load 加载 DINOv3 ViT-L/16 模型
-        print("使用torch.hub加载DINOv3-ViT-L/16模型...")
+        # Load DINOv3 ViT-L/16 via torch.hub.
+        print("Loading DINOv3 ViT-L/16 via torch.hub...")
         
         dino_model = torch.hub.load(
             dinov3_repo_dir, 
-            'dinov3_vitl16',  # DINOv3 ViT-L/16 模型
+            'dinov3_vitl16',  # DINOv3 ViT-L/16 model.
             source='local',
-            weights=dinov3_model_path,  # 使用本地权重
+            weights=dinov3_model_path,  # Local weights.
             trust_repo=True
         )
         
-        print("✓ 成功使用torch.hub加载DINOv3模型")
+        print("✓ Loaded DINOv3 successfully via torch.hub")
         
-        # DINOv3-L 的特征维度
+        # DINOv3-L feature dimension.
         feature_dim = 1024
         
         return dino_model, feature_dim
         
     except Exception as e:
-        print(f"torch.hub加载失败: {e}")
+        print(f"torch.hub loading failed: {e}")
         
-        # 备选方案：手动实现DINOv3加载
-        print("尝试手动加载...")
+        # Fallback: manual loading.
+        print("Trying manual loading...")
         try:
-            # 直接加载模型文件
+            # Load the checkpoint file directly.
             checkpoint = torch.load(dinov3_model_path, map_location='cpu')
             
-            # 检查是否是完整的模型对象
+            # Check whether this is a full model object.
             if hasattr(checkpoint, 'forward'):
-                # 直接是模型对象
+                # Already a model instance.
                 dino_model = checkpoint
-                print("✓ 直接加载模型对象")
+                print("✓ Loaded model object directly")
             else:
-                # 是状态字典，需要先建立模型架构
-                print("检测到状态字典，正在建立模型架构...")
+                # State dict: need to build a compatible architecture first.
+                print("Detected a state_dict; building model architecture...")
                 
-                # 尝试使用timm或手动建立模型架构
+                # Try building a compatible ViT via timm.
                 try:
                     import timm
-                    # 使用timm创建DINOv3类似的模型
+                    # Create a DINOv3-like ViT backbone (feature extractor only).
                     dino_model = timm.create_model(
                         'vit_large_patch16_224',
                         pretrained=False,
-                        num_classes=0,  # 只要特征提取
+                        num_classes=0,  # Feature extraction only.
                         global_pool=''
                     )
                     
-                    # 尝试加载权重
+                    # Load weights.
                     if isinstance(checkpoint, dict):
                         if 'model' in checkpoint:
                             state_dict = checkpoint['model']
@@ -312,19 +312,23 @@ def get_feature_extractor(model_name):
                     else:
                         state_dict = checkpoint
                     
-                    # 尝试加载状态字典
+                    # Load state_dict non-strictly to tolerate key mismatches.
                     missing_keys, unexpected_keys = dino_model.load_state_dict(state_dict, strict=False)
-                    print(f"✓ 使用timm加载模型，缺少: {len(missing_keys)}, 意外: {len(unexpected_keys)}")
+                    print(f"✓ Loaded via timm (missing={len(missing_keys)}, unexpected={len(unexpected_keys)})")
                     
                 except ImportError:
-                    print("timm不可用，请安装: pip install timm")
-                    raise RuntimeError("无法加载DINOv3模型")
+                    print("timm is not available. Install it with: pip install timm")
+                    raise RuntimeError("Unable to load the DINOv3 model")
             
             feature_dim = 1024
             return dino_model, feature_dim
             
         except Exception as e2:
-            raise RuntimeError(f"所有DINOv3加载方式都失败:\ntorch.hub: {e}\n手动加载: {e2}")
+            raise RuntimeError(
+                f"All DINOv3 loading methods failed:\n"
+                f"torch.hub: {e}\n"
+                f"manual loading: {e2}"
+            )
 
 def get_preprocess_transform():
     """Return the preprocessing transformation pipeline for DinoV3."""
@@ -339,50 +343,64 @@ def check_wsi_feature_file_integrity(wsi_name, output_folder,
                                      min_file_size_mb=1.0,
                                      min_cells_threshold=10):
     """
-    检查单个 WSI 的特征文件是否完整/可用。
-    主要用于恢复运行时，过滤掉之前因为 OOM 或异常中断但仍被记录为“已完成”的样本。
+    Check whether a WSI feature Parquet file looks complete/usable.
 
-    规则（任一不满足则视为不完整）：
-      1. parquet 文件存在；
-      2. 文件大小至少 min_file_size_mb；
-      3. 能正常打开，并且包含基本列；
-      4. 行数 > 0（如果你希望更严格，可以把 min_cells_threshold 调大）。
+    This is mainly used for resuming interrupted runs: it filters out WSIs that
+    were previously marked as "processed" but ended up with incomplete outputs
+    due to OOM or other failures.
+
+    A file is considered incomplete if any of the following is true:
+    1) The Parquet file does not exist
+    2) The file size is smaller than ``min_file_size_mb`` (heuristic)
+    3) The file cannot be read or required columns are missing
+    4) The table has 0 rows
+
+    Args:
+        wsi_name: WSI identifier (used as filename prefix).
+        output_folder: Directory containing ``{wsi_name}_features.parquet``.
+        min_file_size_mb: Minimum expected file size in MB (heuristic).
+        min_cells_threshold: If row count is smaller than this threshold, a log
+            message is emitted (but the file may still be valid).
+
+    Returns:
+        True if the file passes basic integrity checks, False otherwise.
     """
     output_path = os.path.join(output_folder, f"{wsi_name}_features.parquet")
 
     if not os.path.exists(output_path):
-        logging.warning(f"[INTEGRITY] {wsi_name}: parquet 文件不存在: {output_path}")
+        logging.warning(f"[INTEGRITY] {wsi_name}: parquet file not found: {output_path}")
         return False
 
     file_size_mb = os.path.getsize(output_path) / 1024 / 1024
     if file_size_mb < min_file_size_mb:
-        logging.warning(f"[INTEGRITY] {wsi_name}: 文件过小 ({file_size_mb:.2f} MB) -> 可疑")
-        # 对于极少细胞的切片，可能仍然是合法结果，所以继续做进一步检查
+        logging.warning(f"[INTEGRITY] {wsi_name}: file too small ({file_size_mb:.2f} MB) -> suspicious")
+        # Extremely low-cell WSIs may still be valid, so continue checking.
 
     try:
-        # 只读 very small sample，避免加载整个大表
-        # max_rows 需要较新的 pyarrow，如果版本不支持，则会忽略该参数
+        # Read-only sanity check (avoid loading an overly large table into memory).
         table = pq.read_table(output_path)
         num_rows = table.num_rows
         cols = set(table.column_names)
     except Exception as e:
-        logging.error(f"[INTEGRITY] {wsi_name}: 读取 parquet 失败: {e}")
+        logging.error(f"[INTEGRITY] {wsi_name}: failed to read parquet: {e}")
         return False
 
     required_cols = {"unique_id", "image_name", "cell_id", "x", "y", "area", "perimeter"}
     if not required_cols.issubset(cols):
-        logging.warning(f"[INTEGRITY] {wsi_name}: 缺少必要列, 现有列: {sorted(list(cols))}")
+        logging.warning(f"[INTEGRITY] {wsi_name}: missing required columns, found: {sorted(list(cols))}")
         return False
 
     if num_rows <= 0:
-        logging.warning(f"[INTEGRITY] {wsi_name}: 行数为 0，视为不完整")
+        logging.warning(f"[INTEGRITY] {wsi_name}: 0 rows, considered incomplete")
         return False
 
     if num_rows < min_cells_threshold:
-        logging.info(f"[INTEGRITY] {wsi_name}: 细胞数 ({num_rows}) 少于阈值 {min_cells_threshold}，"
-                     f"如果这是预期情况可以调低阈值。")
+        logging.info(
+            f"[INTEGRITY] {wsi_name}: row count ({num_rows}) < threshold {min_cells_threshold}. "
+            f"If this is expected, lower min_cells_threshold."
+        )
 
-    logging.info(f"[INTEGRITY] {wsi_name}: 通过完整性检查, 行数={num_rows}, 大小={file_size_mb:.2f} MB")
+    logging.info(f"[INTEGRITY] {wsi_name}: integrity OK, rows={num_rows}, size={file_size_mb:.2f} MB")
     return True
 
 def process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder,
@@ -390,10 +408,11 @@ def process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder,
     """
     Process all patches for a single WSI and save as one Parquet file with PCA.
 
-    返回值:
+    Returns:
         success: bool
-            True  表示该 WSI 已经“处理完”（包括数据缺失而被跳过的情况）；
-            False 表示处理中出现异常（如 OOM），下次续跑时应重新尝试。
+            True means the WSI is considered "done" for this run (including the
+            case where required inputs are missing and the WSI is skipped).
+            False means the run failed part-way (e.g., OOM) and should be retried.
     """
     print(f"\n{'='*60}")
     print(f"Processing WSI: {wsi_name}")
@@ -412,7 +431,7 @@ def process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder,
             mat_wsi_path,
         )
         print(f"Missing data folders for {wsi_name}, skipping.")
-        # 数据本身缺失，不属于 OOM 类型错误，视为“已处理”，避免无限重试
+        # Missing inputs are treated as "done" to avoid infinite retries.
         return True
     
     print(f"   • JSON dir: {json_wsi_path}")
@@ -428,7 +447,7 @@ def process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder,
         with open(processed_log, 'r') as f:
             processed_patches = set(line.strip() for line in f)
     elif force_reprocess:
-        print(f"   • 强制重跑 {wsi_name} 的所有 patch（忽略 processed_patches.log）")
+        print(f"   • Forcing reprocess of all patches for {wsi_name} (ignoring processed_patches.log)")
     
     args_list = []
     for image_file in image_files:
@@ -446,11 +465,12 @@ def process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder,
     if not args_list:
         print(f"All patches already processed for {wsi_name}")
         logging.info(f"No patches to process for {wsi_name} or all already processed.")
-        # 如果已经有对应 parquet 文件，则认为完成；否则视为不完整
+        # If a parquet output exists and passes integrity checks, consider it done;
+        # otherwise treat it as incomplete.
         if check_wsi_feature_file_integrity(wsi_name, output_folder):
             return True
         else:
-            print(f"No new patches, but特征文件可能不完整，将在下一轮重试 {wsi_name}")
+            print(f"No new patches, but the feature file may be incomplete; will retry in the next run: {wsi_name}")
             return False
     
     print(f"Processing {len(args_list)} new patches...")
@@ -512,7 +532,7 @@ def process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder,
                 patch_numbers_all.extend([patch_number] * len(cell_features))
                 total_cells += len(cell_features)
     except Exception as e:
-        # 这里很可能包含 GPU OOM 等错误，视为“本次处理失败，下次需要重跑”
+        # This may include GPU OOM or similar issues: treat as a failed run that should be retried.
         logging.error(f"Error during WSI {wsi_name}: {str(e)}")
         print(f"Error during WSI processing: {str(e)}")
         return False
@@ -574,7 +594,7 @@ def process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder,
     else:
         logging.info(f"No data to save for WSI {wsi_name}")
         print(f"No data to save for WSI {wsi_name}")
-        # 没有任何 cell，视为已成功处理（数据本身为空）
+        # No cells: consider the WSI successfully processed (data is empty).
         return True
 
 def batch_extract_features(image_folder, json_folder, mat_folder, output_folder, model_name='dinov3', pca_components=128, chunk_size=100):
@@ -603,9 +623,9 @@ def batch_extract_features(image_folder, json_folder, mat_folder, output_folder,
             processed_wsi = set(line.strip() for line in f)
 
     # ------------------------------------------------------------------
-    # 在恢复运行前，对已经标记为“完成”的 WSI 做一次完整性检查
-    #  - 如果 parquet 文件不存在或明显不完整，则从 processed_wsi 中移除，
-    #    并加入到 force_reprocess_wsi 集合中，下一轮会强制重跑。
+    # Before resuming, validate previously "processed" WSIs:
+    # - If the parquet file is missing or obviously incomplete, remove it from
+    #   processed_wsi and add it to force_reprocess_wsi for a full re-run.
     # ------------------------------------------------------------------
     force_reprocess_wsi = set()
     if processed_wsi:
@@ -616,16 +636,16 @@ def batch_extract_features(image_folder, json_folder, mat_folder, output_folder,
             if ok:
                 still_ok.add(name)
             else:
-                print(f"   • 检测到不完整或损坏: {name} -> 将重新处理")
+                print(f"   • Detected incomplete/corrupted output: {name} -> will reprocess")
                 force_reprocess_wsi.add(name)
-                # 这里可以选择删除旧文件，避免后续误用
+                # Optionally delete old outputs to avoid accidental reuse.
                 out_path = os.path.join(output_folder, f"{name}_features.parquet")
                 if os.path.exists(out_path):
                     try:
                         os.remove(out_path)
-                        print(f"     已删除旧特征文件: {out_path}")
+                        print(f"     Deleted old feature file: {out_path}")
                     except Exception as e:
-                        print(f"     删除旧特征文件失败: {e}")
+                        print(f"     Failed to delete old feature file: {e}")
         processed_wsi = still_ok
     
     wsi_names = [d for d in os.listdir(image_folder) if os.path.isdir(os.path.join(image_folder, d))]
@@ -650,7 +670,7 @@ def batch_extract_features(image_folder, json_folder, mat_folder, output_folder,
         print(f"\nWSI Progress: {idx+1}/{len(remaining_wsi)}")
         
         wsi_path = os.path.join(image_folder, wsi_name)
-        # 如果该 WSI 之前被判定为“结果不完整”，则强制重跑所有 patch
+        # If this WSI was previously marked as incomplete, force reprocess all patches.
         success = process_wsi(
             wsi_name,
             wsi_path,
@@ -663,13 +683,13 @@ def batch_extract_features(image_folder, json_folder, mat_folder, output_folder,
             force_reprocess=(wsi_name in force_reprocess_wsi),
         )
         
-        # 只有在明确 success 的情况下才标记为已处理，
-        # 避免 OOM / 其他异常时错误地写入 processed_wsi.log。
+        # Only mark as processed on explicit success to avoid writing false positives
+        # on OOM or other failures.
         if success:
             with open(processed_wsi_log, 'a') as f:
                 f.write(f"{wsi_name}\n")
         else:
-            print(f"⚠️  WSI {wsi_name} 本轮处理失败（例如 OOM），不会写入 processed_wsi.log，下次可继续重试。")
+            print(f"Warning: WSI {wsi_name} failed in this run (e.g., OOM); not writing processed_wsi.log. It will be retried next time.")
     
     print(f"\nAll processing completed!")
 

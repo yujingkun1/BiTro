@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-HEST细胞深度特征提取器
-使用DINOv3提取每个细胞的深度特征，结合形态特征构建综合特征向量
+HEST cell-level deep feature extractor for BiTro.
+
+This script extracts per-cell deep embeddings using DINOv3 and applies PCA to
+produce compact feature vectors suitable for downstream graph construction and
+training.
 """
 
 import gc
@@ -21,60 +24,60 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image, ImageDraw
-# 允许处理超大TIFF，避免DecompressionBomb错误
+# Allow loading very large TIFFs (avoid DecompressionBomb warnings).
 Image.MAX_IMAGE_PIXELS = None
 warnings.filterwarnings("ignore")
 
-# 尝试导入staintools用于Vahadane染色归一化
+# Optional dependency for Vahadane stain normalization.
 try:
     import staintools
     STAINTOOLS_AVAILABLE = True
-    print("✓ staintools 可用，将启用Vahadane染色归一化（如开启）")
+    print("✓ staintools available (Vahadane normalization can be enabled)")
 except Exception as _e:
     STAINTOOLS_AVAILABLE = False
-    print("⚠️  staintools 不可用，将跳过染色归一化。安装: pip install staintools")
+    print("Warning: staintools not available; stain normalization will be skipped. Install: pip install staintools")
 
-# 设置HuggingFace镜像（用于中国网络环境）
+# Configure an optional HuggingFace endpoint mirror (useful in some networks).
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
-print(f"已设置HuggingFace镜像: {os.environ.get('HF_ENDPOINT')}")
+print(f"Using HuggingFace endpoint: {os.environ.get('HF_ENDPOINT')}")
 
-# DINOv3模型导入
+# DINOv3 / transformers availability.
 try:
     import transformers
     from transformers import AutoModel, AutoImageProcessor
     DINOV3_AVAILABLE = True
-    print("✓ DINOv3可用")
+    print("✓ DINOv3 available")
 except ImportError as e:
     DINOV3_AVAILABLE = False
-    print(f"错误: 请安装transformers库: pip install transformers")
-    print(f"详细错误: {e}")
+    print("Error: please install transformers (pip install transformers)")
+    print(f"Details: {e}")
 
 
 class HESTCellFeatureExtractor:
-    """HEST细胞深度特征提取器（DINOv3版本）"""
+    """Extract per-cell DINOv3 features for HEST samples."""
 
     def __init__(self,
                  hest_data_dir,
                  output_dir,
-                 dinov3_model_path=None,      # DINOv3本地模型路径
-                 bulk_pca_model_path=None,     # 已移除，仅保留独立PCA
-                 cell_patch_size=48,           # 细胞patch大小，基于实际细胞大小分析
-                 dinov3_feature_dim=1024,     # DINOv3-L特征维度
-                 final_dino_dim=128,          # PCA降维后DINO维度（统一为128）
+                 dinov3_model_path=None,
+                 bulk_pca_model_path=None,
+                 cell_patch_size=48,
+                 dinov3_feature_dim=1024,
+                 final_dino_dim=128,
                  device='cuda',
-                 dino_batch_size=256,         # 大幅增加DINOv3批处理大小
-                 cell_batch_size=50000,       # 大幅增加细胞批处理大小
-                 num_workers=8,               # 多进程工作者数量
-                 assign_spot=False,           # 是否在保存时计算并写出spot_index
-                 stain_normalize=False,       # 是否进行染色归一化（默认关闭，因WSI已预归一化）
-                 stain_method='vahadane',     # 染色归一化方法（目前支持vahadane）
-                 stain_target_image=None,     # 目标图像路径（可选）；若为空将从WSI中自选区域拟合
-                 use_normalized_wsi=False,     # 是否优先使用预归一化的WSI目录
-                 normalized_wsi_subdir="wsis_normalized",  # 预归一化WSI子目录名
-                 raw_wsi_subdir="wsis"):    # 原始WSI子目录名
+                 dino_batch_size=256,
+                 cell_batch_size=50000,
+                 num_workers=8,
+                 assign_spot=False,
+                 stain_normalize=False,
+                 stain_method='vahadane',
+                 stain_target_image=None,
+                 use_normalized_wsi=False,
+                 normalized_wsi_subdir="wsis_normalized",
+                 raw_wsi_subdir="wsis"):
 
         if not DINOV3_AVAILABLE:
-            raise ImportError("DINOv3不可用，请安装transformers")
+            raise ImportError("DINOv3 is not available; please install transformers")
 
         self.hest_data_dir = hest_data_dir
         self.output_dir = output_dir
@@ -83,7 +86,7 @@ class HESTCellFeatureExtractor:
         self.cell_patch_size = cell_patch_size
         self.dinov3_feature_dim = dinov3_feature_dim
         self.final_dino_dim = final_dino_dim
-        self.final_feature_dim = final_dino_dim  # 只使用DINOv3特征，128维
+        self.final_feature_dim = final_dino_dim
         self.device = device
         self.dino_batch_size = dino_batch_size
         self.cell_batch_size = cell_batch_size
@@ -93,66 +96,67 @@ class HESTCellFeatureExtractor:
         self.stain_method = str(stain_method).lower(
         ) if stain_method else 'vahadane'
         self.stain_target_image = stain_target_image
-        self.stain_normalizer = None  # 将在样本级别初始化
+        self.stain_normalizer = None  # Initialized per-sample.
         self.use_normalized_wsi = bool(use_normalized_wsi)
         self.normalized_wsi_subdir = normalized_wsi_subdir
         self.raw_wsi_subdir = raw_wsi_subdir
 
-        # 若启用预归一化WSI，强制关闭二次染色归一化以避免重复处理
+        # If using pre-normalized WSIs, disable stain normalization to avoid
+        # double-normalizing.
         if self.use_normalized_wsi and self.stain_normalize:
-            print("检测到使用预归一化WSI，已自动关闭stain_normalize以避免二次归一化")
+            print("Detected pre-normalized WSIs; disabling stain_normalize to avoid double normalization")
             self.stain_normalize = False
 
-        # 确保输出目录存在
+        # Ensure output directory exists.
         os.makedirs(output_dir, exist_ok=True)
 
-        # 初始化DINOv3模型
+        # Initialize DINOv3 model.
         self.init_dinov3_model()
 
-        print(f"迁移学习配置:")
-        print(f"  - DINOv3批处理大小: {self.dino_batch_size}")
-        print(f"  - 细胞批处理大小: {self.cell_batch_size}")
-        print(f"  - 多进程工作者: {self.num_workers}")
-        print(f"  - 设备: {self.device}")
-        print(f"  - 最终特征维度: {self.final_feature_dim} (仅DINOv3+PCA)")
-        print(f"  - 模型一致性: 使用DINOv3-L")
+        print("Extractor configuration:")
+        print(f"  - DINOv3 batch size: {self.dino_batch_size}")
+        print(f"  - Cell batch size: {self.cell_batch_size}")
+        print(f"  - Workers: {self.num_workers}")
+        print(f"  - Device: {self.device}")
+        print(f"  - Final feature dim: {self.final_feature_dim} (DINOv3 + PCA)")
+        print("  - Backbone: DINOv3-L")
 
     def init_dinov3_model(self):
-        """初始化DINOv3模型（使用torch.hub加载本地权重）"""
-        print("初始化DINOv3模型...")
+        """Initialize the DINOv3 model (torch.hub with local weights)."""
+        print("Initializing DINOv3 model...")
 
         if not self.dinov3_model_path or not os.path.exists(self.dinov3_model_path):
-            raise RuntimeError(f"DINOv3模型文件不存在: {self.dinov3_model_path}")
+            raise RuntimeError(f"DINOv3 model file not found: {self.dinov3_model_path}")
 
-        print(f"使用本地DINOv3模型: {self.dinov3_model_path}")
+        print(f"Using local DINOv3 weights: {self.dinov3_model_path}")
 
         try:
-            # 设置 DINOv3 仓库路径
+            # DINOv3 repository path (local).
             dinov3_repo_dir = "/data/yujk/hovernet2feature/dinov3"
 
             if not os.path.exists(dinov3_repo_dir):
-                raise RuntimeError(f"DINOv3仓库不存在: {dinov3_repo_dir}")
+                raise RuntimeError(f"DINOv3 repository not found: {dinov3_repo_dir}")
 
-            print(f"使用DINOv3仓库: {dinov3_repo_dir}")
+            print(f"Using DINOv3 repository: {dinov3_repo_dir}")
 
-            # 使用 torch.hub.load 加载 DINOv3 ViT-L/16 模型
-            print("使用torch.hub加载DINOv3-ViT-L/16模型...")
+            # Load DINOv3 ViT-L/16 via torch.hub.
+            print("Loading DINOv3 ViT-L/16 via torch.hub...")
 
-            # 直接使用torch.hub加载
+            # Direct torch.hub loading.
             self.dino_model = torch.hub.load(
                 dinov3_repo_dir,
-                'dinov3_vitl16',  # DINOv3 ViT-L/16 模型
+                'dinov3_vitl16',  # DINOv3 ViT-L/16 model.
                 source='local',
-                weights=self.dinov3_model_path,  # 使用本地权重
+                weights=self.dinov3_model_path,  # Local weights.
                 trust_repo=True
             )
 
-            print("✓ 成功使用torch.hub加载DINOv3模型")
+            print("✓ Loaded DINOv3 successfully via torch.hub")
 
-            # 设置特征维度
-            self.dinov3_feature_dim = 1024  # DINOv3-L 的特征维度
+            # Set feature dimension.
+            self.dinov3_feature_dim = 1024  # DINOv3-L feature dimension.
 
-            # 设置图像处理器（使用标准的ImageNet预处理）
+            # Set image preprocessing (ImageNet-style).
             from torchvision import transforms
 
             self.dino_processor_transform = transforms.Compose([
@@ -164,39 +168,39 @@ class HESTCellFeatureExtractor:
                 )
             ])
 
-            print("✓ 设置图像预处理器")
+            print("✓ Image preprocessor configured")
 
         except Exception as e:
-            print(f"torch.hub加载失败: {e}")
+            print(f"torch.hub loading failed: {e}")
 
-            # 备选方案：手动实现DINOv3加载
-            print("尝试手动加载...")
+            # Fallback: manual loading.
+            print("Trying manual loading...")
             try:
-                # 直接加载模型文件
+                # Load checkpoint file directly.
                 checkpoint = torch.load(
                     self.dinov3_model_path, map_location='cpu')
 
-                # 检查是否是完整的模型对象
+                # Check whether this is already a model object.
                 if hasattr(checkpoint, 'forward'):
-                    # 直接是模型对象
+                    # It's a model instance.
                     self.dino_model = checkpoint
-                    print("✓ 直接加载模型对象")
+                    print("✓ Loaded model object directly")
                 else:
-                    # 是状态字典，需要先建立模型架构
-                    print("检测到状态字典，正在建立模型架构...")
+                    # State dict: build a compatible model architecture first.
+                    print("Detected a state_dict; building model architecture...")
 
-                    # 尝试使用timm或手动建立模型架构
+                    # Try building a compatible ViT via timm.
                     try:
                         import timm
-                        # 使用timm创廽DINOv3类似的模型
+                        # Create a DINOv3-like ViT backbone (feature extractor only).
                         self.dino_model = timm.create_model(
                             'vit_large_patch16_224',
                             pretrained=False,
-                            num_classes=0,  # 只要特征提取
+                            num_classes=0,  # Feature extraction only.
                             global_pool=''
                         )
 
-                        # 尝试加载权重
+                        # Load weights.
                         if isinstance(checkpoint, dict):
                             if 'model' in checkpoint:
                                 state_dict = checkpoint['model']
@@ -207,17 +211,17 @@ class HESTCellFeatureExtractor:
                         else:
                             state_dict = checkpoint
 
-                        # 尝试加载状态字典
+                        # Load state_dict non-strictly to tolerate key mismatches.
                         missing_keys, unexpected_keys = self.dino_model.load_state_dict(
                             state_dict, strict=False)
                         print(
-                            f"✓ 使用timm加载模型，缺少: {len(missing_keys)}, 意外: {len(unexpected_keys)}")
+                            f"✓ Loaded via timm (missing={len(missing_keys)}, unexpected={len(unexpected_keys)})")
 
                     except ImportError:
-                        print("timm不可用，请安装: pip install timm")
-                        raise RuntimeError("无法加载DINOv3模型")
+                        print("timm is not available. Install: pip install timm")
+                        raise RuntimeError("Unable to load the DINOv3 model")
 
-                # 设置图像处理器
+                # Set image preprocessing.
                 from torchvision import transforms
                 self.dino_processor_transform = transforms.Compose([
                     transforms.Resize((224, 224)),
@@ -232,30 +236,36 @@ class HESTCellFeatureExtractor:
 
             except Exception as e2:
                 raise RuntimeError(
-                    f"所有DINOv3加载方式都失败:\ntorch.hub: {e}\n手动加载: {e2}")
+                    f"All DINOv3 loading methods failed:\n"
+                    f"torch.hub: {e}\n"
+                    f"manual loading: {e2}"
+                )
 
-        # 设置模型属性
+        # Finalize model attributes.
         self.dino_model.to(self.device)
 
-        # 不强制设置为FP16，让autocast自动管理精度
+        # Do not force FP16; let autocast manage precision.
         # if torch.cuda.is_available():
-        #     self.dino_model = self.dino_model.half()  # 注释掉强制FP16
+        #     self.dino_model = self.dino_model.half()  # (disabled) do not force FP16
 
         self.dino_model.eval()
 
-        print(f"✓ DINOv3模型加载成功，特征维度: {self.dinov3_feature_dim}")
+        print(f"✓ DINOv3 model ready. Feature dim: {self.dinov3_feature_dim}")
 
     def _init_stain_normalizer_for_sample(self, sample_id, wsi, level):
-        """为当前样本初始化（或跳过）染色归一化器。
-        优先使用用户提供的目标图像；否则从WSI中部提取较大区域作为目标。
+        """Initialize (or skip) the stain normalizer for a sample.
+
+        Preference order:
+        1) Use a user-provided target image (if provided).
+        2) Otherwise, fit a target region cropped from the middle of the WSI.
         """
         if not self.stain_normalize:
             return
         if self.stain_method != 'vahadane':
-            print(f"⚠️  未实现的染色方法: {self.stain_method}，将跳过归一化")
+            print(f"Warning: stain method not implemented: {self.stain_method}; skipping normalization")
             return
         if not STAINTOOLS_AVAILABLE:
-            print("⚠️  staintools不可用，跳过Vahadane归一化")
+            print("Warning: staintools not available; skipping Vahadane normalization")
             return
 
         try:
@@ -267,13 +277,13 @@ class HESTCellFeatureExtractor:
                     target_img)
                 normalizer.fit(target_img)
                 self.stain_normalizer = normalizer
-                print(f"✓ 使用提供的目标图像初始化Vahadane归一化: {self.stain_target_image}")
+                print(f"✓ Initialized Vahadane normalization using provided target image: {self.stain_target_image}")
                 return
 
-            # 从WSI中部提取一块较大区域作为目标图像
+            # Fit target image from a center crop of the WSI.
             try:
                 wsi_width, wsi_height = wsi.level_dimensions[level]
-                # 目标取中部，边长为min(2048, 较短边的一半)
+                # Use a center crop with side length min(2048, half of the shorter side).
                 side = min(2048, max(256, min(wsi_width, wsi_height) // 2))
                 x0 = max(0, (wsi_width - side) // 2)
                 y0 = max(0, (wsi_height - side) // 2)
@@ -293,29 +303,25 @@ class HESTCellFeatureExtractor:
             self.stain_normalizer = None
 
     def _normalize_patch(self, patch: np.ndarray) -> np.ndarray:
-        """对单个RGB patch执行染色归一化；失败时回退至原图。"""
+        """Apply stain normalization to a single RGB patch (fallback to original on failure)."""
         if not self.stain_normalize or self.stain_normalizer is None:
             return patch
         try:
             if patch is None or patch.size == 0:
                 return patch
-            # 跳过全黑/接近空白的patch
             if np.max(patch) < 5:
                 return patch
-            # staintools 期望 uint8 RGB
             if patch.dtype != np.uint8:
                 patch = patch.astype(np.uint8)
             patch_std = staintools.LuminosityStandardizer.standardize(patch)
             norm = self.stain_normalizer.transform(patch_std)
-            # 裁剪并转换为uint8
             norm = np.clip(norm, 0, 255).astype(np.uint8)
             return norm
         except Exception as e:
-            # 出错则返回原patch
             return patch
 
     def monitor_resources(self):
-        """监控系统资源使用情况"""
+        """Return a short CPU/RAM/GPU utilization string."""
         try:
             import psutil
             cpu_percent = psutil.cpu_percent(interval=0.1)
@@ -332,18 +338,16 @@ class HESTCellFeatureExtractor:
 
             return resource_info
         except ImportError:
-            return "资源监控需要安装psutil: pip install psutil"
+            return "Resource monitoring requires psutil: pip install psutil"
 
     def load_sample_data(self, sample_id):
-        """加载单个样本的数据"""
+        """Load one sample's WSI path and segmentation table."""
         print(f"加载样本数据: {sample_id}")
 
         sample_data = {}
 
-        # 加载WSI图像（优先使用预归一化目录，自动回退原始目录，并兼容 normalized_ 前缀与 _pyramid 变体）
         candidates = []
         if self.use_normalized_wsi:
-            # 仅使用预归一化WSI，不回退原始WSI；优先使用金字塔图像
             candidates.extend([
                 os.path.join(self.hest_data_dir, self.normalized_wsi_subdir,
                              f"normalized_{sample_id}_pyramid.tif"),
@@ -355,7 +359,6 @@ class HESTCellFeatureExtractor:
                     self.hest_data_dir, self.normalized_wsi_subdir, f"normalized_{sample_id}.tif"),
             ])
         else:
-            # 仅使用原始WSI
             candidates.append(os.path.join(
                 self.hest_data_dir, self.raw_wsi_subdir, f"{sample_id}.tif"))
 
@@ -365,11 +368,9 @@ class HESTCellFeatureExtractor:
                 wsi_path = cand
                 break
         if not wsi_path:
-            # 最后再报错，提示查找过的候选路径
             raise FileNotFoundError(
                 f"未找到WSI文件（use_normalized_wsi={self.use_normalized_wsi}），已检查: {candidates}")
 
-        # 加载细胞分割数据
         cellvit_path = os.path.join(
             self.hest_data_dir, "cellvit_seg", f"{sample_id}_cellvit_seg.parquet")
         if not os.path.exists(cellvit_path):
@@ -391,35 +392,29 @@ class HESTCellFeatureExtractor:
         return sample_data
 
     def extract_cell_patch(self, wsi_image, cell_geometry, patch_size=None):
-        """从WSI中提取单个细胞的图像patch"""
+        """Extract one cell-centered patch from a WSI image array."""
         if patch_size is None:
             patch_size = self.cell_patch_size
 
         try:
-            # 解析细胞几何形状
             if isinstance(cell_geometry, bytes):
                 geom = wkb.loads(cell_geometry)
             else:
                 geom = cell_geometry
 
-            # 获取细胞边界框
             bounds = geom.bounds  # (minx, miny, maxx, maxy)
 
-            # 计算细胞中心点和patch区域
             center_x = (bounds[0] + bounds[2]) / 2
             center_y = (bounds[1] + bounds[3]) / 2
 
-            # 定义patch区域（使用 round 保持与 debug 脚本一致的像素中心对齐）
             half_size = patch_size // 2
             x1 = max(0, int(round(center_x - half_size)))
             y1 = max(0, int(round(center_y - half_size)))
             x2 = min(wsi_image.shape[1], int(round(center_x + half_size)))
             y2 = min(wsi_image.shape[0], int(round(center_y + half_size)))
 
-            # 提取patch
             cell_patch = wsi_image[y1:y2, x1:x2]
 
-            # 如果patch大小不够，进行填充
             if cell_patch.shape[0] < patch_size or cell_patch.shape[1] < patch_size:
                 padded_patch = np.zeros(
                     (patch_size, patch_size, 3), dtype=cell_patch.dtype)
@@ -427,21 +422,18 @@ class HESTCellFeatureExtractor:
                 padded_patch[:h, :w] = cell_patch
                 cell_patch = padded_patch
 
-            # 如果patch太大，进行裁剪
             elif cell_patch.shape[0] > patch_size or cell_patch.shape[1] > patch_size:
                 cell_patch = cell_patch[:patch_size, :patch_size]
 
-            # 染色归一化（若启用）
             cell_patch = self._normalize_patch(cell_patch)
             return cell_patch
 
         except Exception as e:
             print(f"提取细胞patch失败: {e}")
-            # 返回空白patch
             return np.zeros((patch_size, patch_size, 3), dtype=np.uint8)
 
     def extract_dino_features(self, cell_patches):
-        """使用DINOv3提取细胞patches的特征（高性能批量处理）"""
+        """Extract DINOv3 features for cell patches (batched)."""
         if len(cell_patches) == 0:
             return np.zeros((0, self.dinov3_feature_dim))
 
@@ -449,72 +441,55 @@ class HESTCellFeatureExtractor:
         print(f"使用批处理大小: {self.dino_batch_size} (大幅优化GPU利用率)")
 
         features = []
-        batch_size = self.dino_batch_size  # 使用更大的批处理大小
-
-        # 分批处理所有patches
+        batch_size = self.dino_batch_size
         total_batches = (len(cell_patches) + batch_size - 1) // batch_size
 
         with torch.no_grad():
             for i in tqdm(range(0, len(cell_patches), batch_size), desc="DINOv3特征提取", total=total_batches):
                 batch_patches = cell_patches[i:i+batch_size]
 
-                # DINOv3处理（优化内存和计算）
                 try:
-                    # 检查是否有自定义的预处理器
                     if hasattr(self, 'dino_processor_transform'):
-                        # 使用自定义的torchvision预处理器
                         processed_tensors = []
                         for patch in batch_patches:
-                            # 确保是0-255的像素值
                             if patch.max() <= 1.0:
                                 patch = (patch * 255).astype(np.uint8)
 
-                            # 转换为PIL图像
                             from PIL import Image
                             pil_image = Image.fromarray(patch)
 
-                            # 应用预处理
                             tensor = self.dino_processor_transform(pil_image)
                             processed_tensors.append(tensor)
 
-                        # 堆叠成batch
                         batch_tensor = torch.stack(processed_tensors)
 
                     else:
-                        # 使用HuggingFace的处理器
                         processed_images = self._parallel_preprocess_images(
                             batch_patches)
                         inputs = self.dino_processor(
                             images=processed_images, return_tensors="pt")
                         batch_tensor = inputs['pixel_values']
 
-                    # 移动到设备，让autocast管理精度
                     batch_tensor = batch_tensor.to(
                         self.device, non_blocking=True)
-                    # 不强制转换为FP16，让autocast自动管理
                     # if torch.cuda.is_available():
                     #     batch_tensor = batch_tensor.to(self.device, non_blocking=True, dtype=torch.float16)
                     # else:
                     #     batch_tensor = batch_tensor.to(self.device, non_blocking=True)
 
-                    # 提取特征（启用自动混合精度）
                     if torch.cuda.is_available():
-                        with torch.amp.autocast('cuda'):  # 更新的autocast语法
+                        with torch.amp.autocast('cuda'):
                             if hasattr(self, 'dino_processor_transform'):
-                                # torch.hub加载的模型，直接调用
                                 batch_features = self.dino_model(batch_tensor)
-                                # 如果返回的是tuple，取第一个元素
                                 if isinstance(batch_features, tuple):
                                     batch_features = batch_features[0]
-                                # 如果是4D tensor (batch, channels, height, width)，取global average pooling
                                 if len(batch_features.shape) == 4:
                                     batch_features = batch_features.mean(
                                         dim=[2, 3])  # Global average pooling
                                 elif len(batch_features.shape) == 3:
                                     batch_features = batch_features.mean(
-                                        dim=1)  # 平均token特征
+                                        dim=1)
                             else:
-                                # HuggingFace模型
                                 outputs = self.dino_model(
                                     pixel_values=batch_tensor)
                                 batch_features = outputs.last_hidden_state.mean(
@@ -535,10 +510,8 @@ class HESTCellFeatureExtractor:
                             batch_features = outputs.last_hidden_state.mean(
                                 dim=1)
 
-                    # 转换为numpy并检查NaN/Inf值
                     batch_features_np = batch_features.cpu().numpy()
 
-                    # 检查并清理NaN/Inf值
                     if np.isnan(batch_features_np).any() or np.isinf(batch_features_np).any():
                         print(f"  警告: 批次 {i//batch_size} 检测到NaN/Inf值，进行清理")
                         batch_features_np = np.nan_to_num(
@@ -546,23 +519,19 @@ class HESTCellFeatureExtractor:
 
                     features.append(batch_features_np)
 
-                    # 实时资源监控
-                    if i % (batch_size * 5) == 0:  # 每5个大批次显示资源使用
+                    if i % (batch_size * 5) == 0:
                         resource_info = self.monitor_resources()
                         print(f"  资源使用: {resource_info}")
 
-                    # 减少内存清理频率，提高效率
-                    if i % (batch_size * 20) == 0:  # 每20个大批次清理一次
+                    if i % (batch_size * 20) == 0:
                         torch.cuda.empty_cache()
 
                 except Exception as e:
                     print(f"批次 {i//batch_size} DINOv3处理失败: {e}")
-                    # 使用零向量替代
                     zero_features = np.zeros(
                         (len(batch_patches), self.dinov3_feature_dim))
                     features.append(zero_features)
 
-        # 合并所有特征
         all_features = np.vstack(features) if features else np.zeros(
             (0, self.dinov3_feature_dim))
 
@@ -570,26 +539,24 @@ class HESTCellFeatureExtractor:
         return all_features
 
     def _parallel_preprocess_images(self, batch_patches):
-        """并行预处理图像patches"""
+        """Preprocess patches in parallel (for HuggingFace processor)."""
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
             processed_images = list(executor.map(
                 self._preprocess_single_image, batch_patches))
         return processed_images
 
     def _preprocess_single_image(self, patch):
-        """预处理单个图像patch"""
+        """Preprocess a single patch."""
         if patch.max() <= 1.0:
             patch = (patch * 255).astype(np.uint8)
         return Image.fromarray(patch)
 
     def load_wsi_image(self, wsi_path):
-        """加载WSI图像"""
+        """Load a WSI image into an RGB numpy array (best-effort)."""
         try:
-            # 尝试使用openslide加载WSI
             try:
                 import openslide
                 wsi = openslide.OpenSlide(wsi_path)
-                # 获取最高分辨率级别
                 level = 0
                 wsi_image = wsi.read_region(
                     (0, 0), level, wsi.level_dimensions[level])
@@ -599,7 +566,6 @@ class HESTCellFeatureExtractor:
             except ImportError:
                 print("  openslide不可用，尝试其他方法...")
 
-            # 尝试使用cv2加载
             import cv2
             wsi_image = cv2.imread(wsi_path)
             if wsi_image is not None:
@@ -607,7 +573,7 @@ class HESTCellFeatureExtractor:
                 print(f"  使用cv2加载WSI: {wsi_image.shape}")
                 return wsi_image
 
-            # 尝试使用PIL加载
+            # Fallback to PIL.
             from PIL import Image
             wsi_image = Image.open(wsi_path).convert('RGB')
             wsi_image = np.array(wsi_image)
@@ -619,14 +585,16 @@ class HESTCellFeatureExtractor:
             return None
 
     class _SimpleWSI:
-        """用于非金字塔/非OpenSlide支持的普通TIFF的简单WSI包装。
-        仅实现本脚本所需的最小接口：dimensions、level_count、
-        level_dimensions、level_downsamples、read_region、close。
+        """Minimal WSI wrapper for plain TIFFs (no pyramid/OpenSlide).
+
+        Implements a small subset of the OpenSlide-like interface used in this
+        script: dimensions, level_count, level_dimensions, level_downsamples,
+        read_region, close.
         """
 
         def __init__(self, image_path: str):
             from PIL import Image
-            # 不在这里转换为RGB，避免一次性解码超大图像
+            # Avoid forcing full RGB decode here to reduce peak memory.
             self._img = Image.open(image_path)
             self._width, self._height = self._img.size
             self.level_count = 1
@@ -635,30 +603,36 @@ class HESTCellFeatureExtractor:
             self.dimensions = (self._width, self._height)
 
         def read_region(self, location, level, size):
-            """仿OpenSlide接口。location为(level 0)坐标，size为输出尺寸。
-            超出边界部分以黑色填充。
+            """OpenSlide-like read_region.
+
+            Args:
+                location: (x, y) coordinates in level-0 space.
+                level: Pyramid level (only 0 is supported here).
+                size: Output size (width, height).
+
+            Out-of-bounds regions are filled with black pixels.
             """
             from PIL import Image
 
             if level != 0:
-                # 简单实现：仅支持单级图像；若请求其他级别，退化为0级并缩放
+                # Only a single level is supported here; fall back to level 0.
                 level = 0
 
             x, y = location
             w, h = size
 
-            # 计算裁剪区域与边界
+            # Compute crop region and clamp to image bounds.
             left = max(0, int(x))
             top = max(0, int(y))
             right = min(self._width, int(x) + int(w))
             bottom = min(self._height, int(y) + int(h))
 
-            # 创建黑底画布
+            # Create a black canvas for out-of-bounds padding.
             canvas = Image.new('RGB', (int(w), int(h)), (0, 0, 0))
 
             if right > left and bottom > top:
                 crop = self._img.crop((left, top, right, bottom))
-                # 放置到相对偏移位置
+                # Paste crop at the relative offset.
                 offset_x = max(0, left - int(x))
                 offset_y = max(0, top - int(y))
                 canvas.paste(crop, (offset_x, offset_y))
@@ -672,24 +646,21 @@ class HESTCellFeatureExtractor:
                 pass
 
     def process_sample_with_independent_pca(self, sample_id):
-        """处理单个样本，独立训练PCA，提取完直接保存（每例独立PCA版本）"""
+        """Process one sample with per-sample PCA and save outputs."""
         print(f"\n=== 处理空转样本: {sample_id} ===")
         print("每例独立训练PCA模型，128维DINOv3特征")
 
-        # 加载样本数据
         sample_data = self.load_sample_data(sample_id)
         cellvit_df = sample_data['cellvit_df']
         wsi_path = sample_data['wsi_path']
 
-        # 提取细胞patches
         num_cells = len(cellvit_df)
-        max_cells = num_cells  # 提取所有细胞，不限制数量
+        max_cells = num_cells
         cell_patches = []
-        cell_positions = []  # 与patch按顺序对齐的细胞中心坐标 (x, y)
+        cell_positions = []  # (x, y) aligned with extracted patches.
 
         print(f"准备提取所有 {num_cells} 个细胞的特征...")
 
-        # 先尝试加载WSI图像的小区域来测试
         print("尝试加载WSI图像...")
         try:
             import openslide
@@ -705,9 +676,7 @@ class HESTCellFeatureExtractor:
                 print(f"  简单WSI级别数: {wsi.level_count}")
                 print(f"  简单WSI级别尺寸: {wsi.level_dimensions}")
 
-            # 使用级别1分辨率（若可用），否则使用0；若启用预归一化，固定使用当前图像的最高可用级别
             if self.use_normalized_wsi:
-                # 对于归一化图像，优先选择 level=0（因为通常是单层或最高分辨率）
                 level = 0 if getattr(wsi, 'level_count', 1) == 1 else min(
                     1, wsi.level_count - 1)
             else:
@@ -717,13 +686,11 @@ class HESTCellFeatureExtractor:
                     level = 0
             print(f"  使用级别 {level}，尺寸: {wsi.level_dimensions[level]}")
 
-            # 从真实WSI中提取细胞patches（大批量并行处理）
-            batch_size = self.cell_batch_size  # 使用优化后的批处理大小
+            batch_size = self.cell_batch_size
             num_batches = (max_cells + batch_size - 1) // batch_size
 
             print(f"  将分 {num_batches} 批处理，每批 {batch_size} 个细胞 (大幅优化处理效率)")
 
-            # 初始化样本级Vahadane归一化器（若开启）
             self._init_stain_normalizer_for_sample(sample_id, wsi, level)
 
             for batch_idx in range(num_batches):
@@ -734,24 +701,20 @@ class HESTCellFeatureExtractor:
                 print(
                     f"\n  处理批次 {batch_idx+1}/{num_batches}: 细胞 {start_idx}-{end_idx-1} ({batch_cells} 个)")
 
-                # 并行提取patches以大幅提高CPU利用率
                 print(f"\n  使用{self.num_workers}个并行进程提取patches...")
                 batch_patches, batch_positions = self._extract_patches_parallel(
                     cellvit_df.iloc[start_idx:end_idx], wsi, level, start_idx
                 )
 
-                # 将本批次的patches添加到总列表
                 cell_patches.extend(batch_patches)
                 cell_positions.extend(batch_positions)
 
-                # 优化内存清理
                 del batch_patches
                 gc.collect()
 
                 print(
                     f"  批次 {batch_idx+1} 完成，累计提取 {len(cell_patches)} 个patches")
 
-                # 实时GPU内存状态监控
                 if torch.cuda.is_available():
                     gpu_memory = torch.cuda.memory_allocated() / 1024**3
                     print(f"  当前GPU内存使用: {gpu_memory:.2f} GB")
@@ -764,30 +727,25 @@ class HESTCellFeatureExtractor:
             print("  无法从WSI中提取真实细胞图像，程序终止")
             raise RuntimeError(f"WSI图像加载失败，无法继续特征提取: {e}") from e
 
-        # 提取DINOv3特征
         print("提取DINOv3特征...")
         dino_features = self.extract_dino_features(cell_patches)
 
-        # 提取完特征后，细胞patch已无用，立即释放以降低内存峰值
         try:
             del cell_patches
         except Exception:
             pass
         gc.collect()
 
-        # 为当前样本独立训练PCA降维（不融合形态特征）
         print(f"为样本 {sample_id} 独立训练PCA降维...")
         final_features = self.apply_independent_pca(dino_features, sample_id)
 
-        # PCA完成后释放高维DINO特征，进一步降低内存占用
         try:
             del dino_features
         except Exception:
             pass
         gc.collect()
 
-        # 准备元数据
-        # 尝试估算归一化WSI对应原始WSI的等效level（若路径存在原始WSI且可读）
+        # Try to estimate the equivalent raw WSI level for normalized WSIs.
         normalized_equiv_level = None
         try:
             if self.use_normalized_wsi:
@@ -797,7 +755,6 @@ class HESTCellFeatureExtractor:
                 if os.path.exists(raw_wsi_path):
                     raw_wsi = openslide.OpenSlide(raw_wsi_path)
                     norm_w, norm_h = wsi.level_dimensions[level]
-                    # 找到与归一化尺寸最接近的原始level
                     diffs = []
                     for li, (rw, rh) in enumerate(raw_wsi.level_dimensions):
                         diffs.append(abs(rw - norm_w) + abs(rh - norm_h))
@@ -813,15 +770,13 @@ class HESTCellFeatureExtractor:
             'feature_dim': self.final_feature_dim,
             'dino_dim': self.final_dino_dim,
             'patch_size': self.cell_patch_size,
-            'wsi_level': int(level),  # 实际使用的级别（普通TIFF回退时为0）
+            'wsi_level': int(level),
             'normalized_equiv_raw_level': normalized_equiv_level,
             'total_cells_processed': num_cells,
             'independent_pca': True,
             'pca_trained_on_sample': sample_id
         }
 
-        # 保存特征
-        # 位置与索引
         positions = np.asarray(cell_positions, dtype=np.float32) if len(
             cell_positions) > 0 else np.zeros((num_cells, 2), dtype=np.float32)
         cell_index = np.arange(positions.shape[0], dtype=np.int64)
@@ -856,13 +811,12 @@ class HESTCellFeatureExtractor:
 
 
     def _extract_patches_parallel(self, cellvit_batch, wsi, level, start_idx):
-        """使用多线程并行提取细胞patches以最大化CPU利用率"""
+        """Extract cell patches in parallel using a thread pool."""
         batch_patches = []
         batch_positions = []
 
-        # 使用线程池而不是进程池，因为WSI对象不能序列化
+        # Use threads instead of processes because WSI objects are not serializable.
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            # 创建任务列表
             tasks = []
             for i, (_, row) in enumerate(cellvit_batch.iterrows()):
                 task = executor.submit(
@@ -875,10 +829,9 @@ class HESTCellFeatureExtractor:
                 )
                 tasks.append(task)
 
-            # 收集结果
             for task in tqdm(tasks, desc=f"批次并行提取patches"):
                 try:
-                    patch, pos = task.result(timeout=10)  # 10秒超时
+                    patch, pos = task.result(timeout=10)  # 10s timeout
                     batch_patches.append(patch)
                     batch_positions.append(pos)
                 except Exception as e:
@@ -890,55 +843,52 @@ class HESTCellFeatureExtractor:
         return batch_patches, batch_positions
 
     def _extract_single_patch_threaded(self, geom_bytes, wsi, level, patch_size, cell_idx):
-        """线程安全的单个细胞patch提取，使用黑色填充无效区域"""
+        """Thread-safe extraction of a single cell patch with black padding."""
         try:
             geom = wkb.loads(geom_bytes)
             centroid = geom.centroid
             center_x, center_y = centroid.x, centroid.y
 
-            # 计算在指定级别下的坐标（使用 round 与 debug 脚本保持一致）
+            # Compute coordinates at the requested level (round for alignment).
             scale_factor = wsi.level_downsamples[level]
             half_size = patch_size // 2
 
-            # 计算WSI边界（level 对应的尺寸）
+            # WSI bounds at this level.
             wsi_width, wsi_height = wsi.level_dimensions[level]
 
-            # 计算提取区域坐标（四舍五入到整数像素，兼容 SimpleWSI）
+            # Compute extraction region (rounded to integer pixels).
             x_start = int(round(center_x - half_size * scale_factor))
             y_start = int(round(center_y - half_size * scale_factor))
             x_end = x_start + int(round(patch_size * scale_factor))
             y_end = y_start + int(round(patch_size * scale_factor))
 
-            # 创建黑色填充的patch
+            # Black-padded patch.
             cell_patch = np.zeros((patch_size, patch_size, 3), dtype=np.uint8)
 
-            # 计算WSI内的有效区域
+            # Clamp to valid region inside the WSI.
             valid_x_start = max(0, x_start)
             valid_y_start = max(0, y_start)
-            # wsi.level_dimensions[level] 已表示该 level 的像素尺寸，直接与 x_end 比较
             valid_x_end = min(wsi_width, x_end)
             valid_y_end = min(wsi_height, y_end)
 
-            # 如果有有效区域，提取该部分
+            # If there is any valid region, extract it.
             if valid_x_start < valid_x_end and valid_y_start < valid_y_end:
-                # 计算在WSI中的实际提取尺寸
+                # Compute the extracted region size.
                 region_width = int(
                     (valid_x_end - valid_x_start) / scale_factor)
                 region_height = int(
                     (valid_y_end - valid_y_start) / scale_factor)
 
                 if region_width > 0 and region_height > 0:
-                    # 提取有效区域
                     region = wsi.read_region(
                         (valid_x_start, valid_y_start),
                         level,
                         (region_width, region_height)
                     )
 
-                    # 转换为RGB数组
                     region_array = np.array(region.convert('RGB'))
 
-                    # 计算在patch中的放置位置
+                    # Compute placement offset within the output patch.
                     patch_x_start = max(
                         0, int(round((valid_x_start - x_start) / (scale_factor if scale_factor != 0 else 1))))
                     patch_y_start = max(
@@ -948,11 +898,11 @@ class HESTCellFeatureExtractor:
                     patch_y_end = min(
                         patch_size, patch_y_start + region_array.shape[0])
 
-                    # 确保不超出边界，并将有效区域放入patch
+                    # Paste extracted region into the output patch.
                     if (patch_x_end > patch_x_start and patch_y_end > patch_y_start and
                             region_array.shape[0] > 0 and region_array.shape[1] > 0):
 
-                        # 调整region_array大小以匹配目标区域
+                        # Resize region_array to match the target slice.
                         target_height = patch_y_end - patch_y_start
                         target_width = patch_x_end - patch_x_start
 
@@ -963,20 +913,24 @@ class HESTCellFeatureExtractor:
                         cell_patch[patch_y_start:patch_y_end,
                                    patch_x_start:patch_x_end] = region_array
 
-            # 染色归一化（若启用）
+            # Optional stain normalization.
             cell_patch = self._normalize_patch(cell_patch)
             return cell_patch, (float(center_x), float(center_y))
 
         except Exception as e:
-            if cell_idx < 5:  # 只显示前5个错误
+            if cell_idx < 5:  # Only show first few errors.
                 print(f"    细胞 {cell_idx} patch提取失败: {e}")
-            # 返回纯黑色patch作为默认值
+            # Fallback to a black patch.
             return np.zeros((patch_size, patch_size, 3), dtype=np.uint8), (0.0, 0.0)
 
     def assign_spot_indices(self, sample_id, positions: np.ndarray):
-        """基于HEST的AnnData obsm['spatial']按最近邻且半径限制分配spot_index。
-        逻辑与 scripts/augment_features_with_positions.py 保持一致。
-        返回 ndarray[int64]，长度=N（细胞数），不可分配位置为-1。
+        """Assign spot_index using nearest-neighbor matching with a radius constraint.
+
+        The matching is based on HEST AnnData ``obsm['spatial']`` and is aligned
+        with the logic in ``scripts/augment_features_with_positions.py``.
+
+        Returns:
+            A 1D int64 array of length N (cells). Unassigned cells are -1.
         """
         import scanpy as sc
         st_file = os.path.join(self.hest_data_dir, "st", f"{sample_id}.h5ad")
@@ -1026,10 +980,9 @@ class HESTCellFeatureExtractor:
         return spot_index
 
     def apply_independent_pca(self, dino_features, sample_id):
-        """为当前样本独立训练PCA降维（每例独立PCA版本）"""
+        """Train a per-sample PCA and reduce DINOv3 features."""
         print(f"为样本 {sample_id} 独立训练PCA降维器...")
 
-        # 检查并清理NaN值
         print(f"  检查数据质量...")
         nan_count = np.isnan(dino_features).sum()
         inf_count = np.isinf(dino_features).sum()
@@ -1043,17 +996,13 @@ class HESTCellFeatureExtractor:
             dino_features = np.nan_to_num(
                 dino_features, posinf=1.0, neginf=-1.0)
 
-        # 诊断：检测是否存在退化特征（例如所有行或列接近相同/为零）
         try:
-            # 每列标准差
             col_std = dino_features.std(axis=0)
             zero_std_cols = int(np.sum(col_std < 1e-8))
             print(f"  诊断: DINO 特征列 std 为 0 或接近 0 的数量: {zero_std_cols}/{dino_features.shape[1]}")
-            # 列 std 的分位数
             std_percentiles = np.percentile(col_std, [0, 1, 5, 25, 50, 75, 95, 99, 100])
             print(f"  诊断: 列 std 分位数: {std_percentiles}")
 
-            # 行级别：抽样检查重复行比例（避免对全部数据执行昂贵的唯一性计算）
             n_samples = min(2000, dino_features.shape[0])
             rng = np.random.default_rng(42)
             idx = rng.choice(dino_features.shape[0], size=n_samples, replace=False)
@@ -1062,11 +1011,9 @@ class HESTCellFeatureExtractor:
             unique_frac = unique_rows.shape[0] / float(n_samples)
             print(f"  诊断: 在 {n_samples} 个随机样本中，唯一行比例: {unique_frac:.3f}")
 
-            # 全部数据是否为常数向量（通过检查总体方差）
             total_var = np.var(dino_features)
             print(f"  诊断: DINO 特征总体方差: {total_var:.6e}")
 
-            # 将前10行保存为预览以便人工检查（文件小）
             try:
                 preview_path = os.path.join(self.output_dir, f"{sample_id}_dino_features_preview.npy")
                 np.save(preview_path, dino_features[:10])
@@ -1076,12 +1023,10 @@ class HESTCellFeatureExtractor:
         except Exception as _e:
             print(f"  诊断失败: {_e}")
 
-        # 检查是否还有有效的特征
         if np.all(dino_features == 0):
             print(f"  错误: 所有特征都为0，无法进行PCA")
             raise ValueError(f"样本 {sample_id} 的所有DINOv3特征都为0，可能是特征提取失败")
 
-        # 动态调整PCA维度，不能超过样本数
         n_samples = dino_features.shape[0]
         n_features = dino_features.shape[1]
         max_components = min(n_samples, n_features)
@@ -1097,7 +1042,6 @@ class HESTCellFeatureExtractor:
             raise ValueError(
                 f"样本 {sample_id} 无法确定有效的PCA维度，样本数={n_samples}, 特征数={n_features}")
 
-        # 为当前样本独立训练PCA
         from sklearn.decomposition import PCA
         try:
             sample_pca = PCA(n_components=actual_dino_dim, random_state=42)
@@ -1108,7 +1052,7 @@ class HESTCellFeatureExtractor:
                 f"  特征统计: min={dino_features.min():.6f}, max={dino_features.max():.6f}, mean={dino_features.mean():.6f}, std={dino_features.std():.6f}")
             raise ValueError(f"样本 {sample_id} PCA训练失败: {e}") from e
 
-        # 保存当前样本的PCA模型（使用原子性写入）
+        # Save PCA model with atomic write.
         sample_pca_path = os.path.join(
             self.output_dir, f"{sample_id}_dino_pca_model.pkl")
         temp_pca_path = sample_pca_path + ".tmp"
@@ -1116,10 +1060,8 @@ class HESTCellFeatureExtractor:
         try:
             with open(temp_pca_path, 'wb') as f:
                 pickle.dump(sample_pca, f)
-            # 原子性重命名
             os.replace(temp_pca_path, sample_pca_path)
         except Exception as e:
-            # 如果保存失败，清理临时文件
             if os.path.exists(temp_pca_path):
                 try:
                     os.remove(temp_pca_path)
@@ -1127,7 +1069,6 @@ class HESTCellFeatureExtractor:
                     pass
             raise RuntimeError(f"保存PCA模型失败: {e}") from e
 
-        # 计算方差解释比例
         explained_variance = sample_pca.explained_variance_ratio_.sum()
         explained_variance_each = sample_pca.explained_variance_ratio_
 
@@ -1137,13 +1078,11 @@ class HESTCellFeatureExtractor:
         print(
             f"  - 总解释方差比例: {explained_variance:.4f} ({explained_variance*100:.2f}%)")
 
-        # 显示前10个主成分的方差解释比例
         print(f"  - 前10个主成分的方差解释比例:")
         for i in range(min(10, len(explained_variance_each))):
             print(
                 f"    PC{i+1}: {explained_variance_each[i]:.4f} ({explained_variance_each[i]*100:.2f}%)")
 
-        # 显示累积解释比例
         cumulative_variance = np.cumsum(explained_variance_each)
         print(f"  - 累积解释比例:")
         milestones = [10, 20, 50, 100, 128]
@@ -1157,18 +1096,20 @@ class HESTCellFeatureExtractor:
         return reduced_features
 
     def save_features(self, sample_id, combined_features, metadata, positions=None, cell_index=None, spot_index=None):
-        """保存提取的特征，兼容 augment_features_with_positions.py 的输出格式。
-        始终写入 features 和 metadata；若提供 positions/cell_index/spot_index 则一并写入。
-        使用原子性写入（临时文件+重命名）保证文件完整性。
-        注意：为减少内存峰值，这里不使用压缩版本（np.savez_compressed），
-        而是使用np.savez直接写入，牺牲部分磁盘空间换取更稳定的内存占用。
+        """Save extracted features in a format compatible with downstream scripts.
+
+        Always writes ``features`` and ``metadata``. If provided, also writes
+        ``positions``, ``cell_index`` and ``spot_index``.
+
+        Uses an atomic write (temp file + rename) to avoid partial outputs.
+        Uses ``np.savez`` (uncompressed) to reduce peak memory usage.
         """
         output_file = os.path.join(
             self.output_dir, f"{sample_id}_combined_features.npz")
-        # 使用明确的临时npz文件名，避免 np.savez 自动追加 ".npz" 导致的路径不匹配
+        # Use an explicit temp name to avoid ".npz" auto-suffix surprises.
         temp_file = output_file + ".tmp.npz"
 
-        # 组装保存字典
+        # Build payload dict.
         save_dict = {
             'features': combined_features,
             'metadata': metadata
@@ -1180,14 +1121,11 @@ class HESTCellFeatureExtractor:
         if spot_index is not None:
             save_dict['spot_index'] = spot_index
 
-        # 先写入临时文件，确保原子性
+        # Write temp file first (atomic replace).
         try:
-            # 使用非压缩np.savez以避免在大数组上产生过高的内存峰值
             np.savez(temp_file, **save_dict)
-            # 原子性重命名（完成后才替换原文件）
             os.replace(temp_file, output_file)
         except Exception as e:
-            # 如果保存失败，清理临时文件
             if os.path.exists(temp_file):
                 try:
                     os.remove(temp_file)
@@ -1206,29 +1144,29 @@ class HESTCellFeatureExtractor:
 
 
 def get_all_hest_samples(hest_data_dir):
-    """获取所有可用的HEST样本ID"""
+    """Return available HEST sample IDs discovered on disk."""
     import glob
     import os
 
-    # 查找所有cellvit分割文件
+    # Find all cellvit segmentation parquet files.
     cellvit_pattern = os.path.join(
         hest_data_dir, "cellvit_seg", "*_cellvit_seg.parquet")
     cellvit_files = glob.glob(cellvit_pattern)
 
-    # 提取样本ID
+    # Extract sample IDs and keep those with an accessible WSI.
     sample_ids = []
     for file_path in cellvit_files:
         filename = os.path.basename(file_path)
         sample_id = filename.replace('_cellvit_seg.parquet', '')
 
-        # 检查对应的WSI文件是否存在（优先预归一化目录，其次原始目录），兼容 normalized_ 前缀
+        # Check whether a corresponding WSI exists (normalized preferred, then raw).
         normalized_candidates = [
-            # 优先金字塔版本
+            # Prefer pyramid variants.
             os.path.join(hest_data_dir, "wsis_normalized",
                          f"normalized_{sample_id}_pyramid.tif"),
             os.path.join(hest_data_dir, "wsis_normalized",
                          f"{sample_id}_pyramid.tif"),
-            # 非金字塔回退
+            # Non-pyramid fallback.
             os.path.join(hest_data_dir, "wsis_normalized", f"{sample_id}.tif"),
             os.path.join(hest_data_dir, "wsis_normalized",
                          f"normalized_{sample_id}.tif"),
@@ -1237,17 +1175,17 @@ def get_all_hest_samples(hest_data_dir):
         if any(os.path.exists(p) for p in normalized_candidates) or os.path.exists(raw_candidate):
             sample_ids.append(sample_id)
 
-    sample_ids.sort()  # 按字母顺序排序
+    sample_ids.sort()
     return sample_ids
 
 
 def get_progress_file(output_dir):
-    """获取进度文件路径"""
+    """Return the progress file path."""
     return os.path.join(output_dir, "extraction_progress.json")
 
 
 def load_progress(output_dir):
-    """加载处理进度"""
+    """Load progress state from disk."""
     progress_file = get_progress_file(output_dir)
     if os.path.exists(progress_file):
         try:
@@ -1262,7 +1200,7 @@ def load_progress(output_dir):
 
 
 def save_progress(output_dir, progress):
-    """保存处理进度"""
+    """Save progress state to disk."""
     progress_file = get_progress_file(output_dir)
     try:
         with open(progress_file, 'w') as f:
@@ -1273,113 +1211,100 @@ def save_progress(output_dir, progress):
 
 
 def verify_sample_file_integrity(output_dir, sample_id, expected_num_cells=None):
-    """验证样本文件的完整性
-    
+    """Validate the integrity of a saved sample output file.
+
     Args:
-        output_dir: 输出目录
-        sample_id: 样本ID
-        expected_num_cells: 期望的细胞数量（如果提供，将进行数量验证）
-    
+        output_dir: Output directory.
+        sample_id: Sample ID.
+        expected_num_cells: Optional expected cell count for validation.
+
     Returns:
-        tuple: (is_complete: bool, num_cells_in_file: int, error_msg: str)
+        A tuple (is_complete, num_cells_in_file, error_msg).
     """
     output_file = os.path.join(
         output_dir, f"{sample_id}_combined_features.npz")
     pca_file = os.path.join(output_dir, f"{sample_id}_dino_pca_model.pkl")
     
-    # 检查文件是否存在
     if not os.path.exists(output_file):
-        return False, 0, "特征文件不存在"
+        return False, 0, "Feature file not found"
     if not os.path.exists(pca_file):
-        return False, 0, "PCA模型文件不存在"
+        return False, 0, "PCA model file not found"
     
-    # 检查是否有临时文件残留（说明上次保存未完成）
     temp_file = output_file + ".tmp.npz"
     if os.path.exists(temp_file):
-        return False, 0, "检测到临时文件残留，上次保存可能未完成"
+        return False, 0, "Temporary file exists; previous save may be incomplete"
     
-    # 验证npz文件完整性
     try:
         with np.load(output_file) as data:
-            # 检查必需的字段是否存在
             if 'features' not in data:
-                return False, 0, "缺少 'features' 字段"
+                return False, 0, "Missing required field: 'features'"
             if 'metadata' not in data:
-                return False, 0, "缺少 'metadata' 字段"
+                return False, 0, "Missing required field: 'metadata'"
             
-            # 检查特征数组是否有效
             features = data['features']
             if features.size == 0:
-                return False, 0, "特征数组为空"
+                return False, 0, "Empty feature array"
             
             num_cells_in_file = features.shape[0]
             
-            # 验证特征维度
             if len(features.shape) != 2:
-                return False, num_cells_in_file, f"特征数组维度错误: {features.shape}"
+                return False, num_cells_in_file, f"Invalid feature array shape: {features.shape}"
             
-            # 检查metadata中的细胞数量是否一致
             try:
                 metadata = data['metadata']
-                # npz文件中的metadata可能是numpy数组，需要转换为dict
+                # metadata may be stored as a numpy object; convert to dict when possible.
                 if hasattr(metadata, 'item'):
                     metadata = metadata.item()
                 elif isinstance(metadata, np.ndarray):
-                    # 如果是0维数组，提取标量
                     if metadata.ndim == 0:
                         metadata = metadata.item()
-                    # 如果是1维数组且长度为1，提取元素
                     elif metadata.ndim == 1 and len(metadata) == 1:
                         metadata = metadata[0]
                 
                 if isinstance(metadata, dict):
                     metadata_num_cells = metadata.get('num_cells', None)
                     if metadata_num_cells is not None and metadata_num_cells != num_cells_in_file:
-                        return False, num_cells_in_file, f"metadata中的细胞数量({metadata_num_cells})与特征数量({num_cells_in_file})不一致"
+                        return False, num_cells_in_file, f"metadata num_cells ({metadata_num_cells}) != feature rows ({num_cells_in_file})"
             except Exception as e:
-                # metadata解析失败不影响主要验证，只记录警告
                 pass
             
-            # 如果提供了期望数量，进行验证
             if expected_num_cells is not None:
                 if num_cells_in_file != expected_num_cells:
-                    return False, num_cells_in_file, f"文件中的细胞数量({num_cells_in_file})与期望数量({expected_num_cells})不一致"
+                    return False, num_cells_in_file, f"Cell count mismatch: file={num_cells_in_file}, expected={expected_num_cells}"
             
-            # 验证其他字段的一致性
             if 'positions' in data:
                 positions = data['positions']
                 if positions.shape[0] != num_cells_in_file:
-                    return False, num_cells_in_file, f"positions数量({positions.shape[0]})与特征数量({num_cells_in_file})不一致"
+                    return False, num_cells_in_file, f"positions rows ({positions.shape[0]}) != feature rows ({num_cells_in_file})"
             
             if 'cell_index' in data:
                 cell_index = data['cell_index']
                 if len(cell_index) != num_cells_in_file:
-                    return False, num_cells_in_file, f"cell_index数量({len(cell_index)})与特征数量({num_cells_in_file})不一致"
+                    return False, num_cells_in_file, f"cell_index length ({len(cell_index)}) != feature rows ({num_cells_in_file})"
             
             if 'spot_index' in data:
                 spot_index = data['spot_index']
                 if len(spot_index) != num_cells_in_file:
-                    return False, num_cells_in_file, f"spot_index数量({len(spot_index)})与特征数量({num_cells_in_file})不一致"
+                    return False, num_cells_in_file, f"spot_index length ({len(spot_index)}) != feature rows ({num_cells_in_file})"
             
-            # 检查是否有NaN或Inf值
             if np.isnan(features).any() or np.isinf(features).any():
-                return False, num_cells_in_file, "特征中包含NaN或Inf值"
+                return False, num_cells_in_file, "Features contain NaN/Inf values"
             
-        return True, num_cells_in_file, "文件完整"
+        return True, num_cells_in_file, "File looks complete"
         
     except Exception as e:
-        return False, 0, f"文件损坏或无法读取: {str(e)}"
+        return False, 0, f"Corrupted/unreadable file: {str(e)}"
 
 
 def get_expected_num_cells(hest_data_dir, sample_id):
-    """获取样本的期望细胞数量（从cellvit_seg文件）
-    
+    """Get the expected cell count for a sample (from the cellvit_seg parquet).
+
     Args:
-        hest_data_dir: HEST数据目录
-        sample_id: 样本ID
-    
+        hest_data_dir: HEST data directory.
+        sample_id: Sample ID.
+
     Returns:
-        int: 期望的细胞数量，如果无法获取则返回None
+        Expected number of cells, or None if unavailable.
     """
     try:
         cellvit_path = os.path.join(
@@ -1388,20 +1313,20 @@ def get_expected_num_cells(hest_data_dir, sample_id):
             cellvit_df = pd.read_parquet(cellvit_path)
             return len(cellvit_df)
     except Exception as e:
-        print(f"⚠️  无法获取样本 {sample_id} 的期望细胞数量: {e}")
+        print(f"Warning: unable to get expected cell count for sample {sample_id}: {e}")
     return None
 
 
 def is_sample_completed(output_dir, sample_id, expected_num_cells=None):
-    """检查样本是否已完成处理（包含完整性验证）
-    
+    """Check whether a sample is completed (including integrity validation).
+
     Args:
-        output_dir: 输出目录
-        sample_id: 样本ID
-        expected_num_cells: 期望的细胞数量（可选，用于验证）
-    
+        output_dir: Output directory.
+        sample_id: Sample ID.
+        expected_num_cells: Optional expected cell count for validation.
+
     Returns:
-        bool: 如果文件完整则返回True，否则返回False
+        True if the output file looks complete, otherwise False.
     """
     is_complete, num_cells, error_msg = verify_sample_file_integrity(
         output_dir, sample_id, expected_num_cells)
@@ -1415,11 +1340,11 @@ def is_sample_completed(output_dir, sample_id, expected_num_cells=None):
 
 
 def remove_incomplete_files(output_dir, sample_id):
-    """删除不完整的文件（特征文件和PCA模型文件）
-    
+    """Delete incomplete output artifacts (feature NPZ and PCA model file).
+
     Args:
-        output_dir: 输出目录
-        sample_id: 样本ID
+        output_dir: Output directory.
+        sample_id: Sample ID.
     """
     output_file = os.path.join(
         output_dir, f"{sample_id}_combined_features.npz")
@@ -1440,83 +1365,83 @@ def remove_incomplete_files(output_dir, sample_id):
 
 
 def main_independent_pca_extraction(target_samples=None):
-    """主函数：空转数据独立PCA特征提取（每例独立PCA）- 支持断点续传和指定样本
-    
+    """Run independent-PCA feature extraction with resume support.
+
     Args:
-        target_samples: 可选，要处理的样本ID列表。如果为None，则自动断点续传处理所有样本。
-                       如果提供了列表，则只处理列表中的样本（仍会跳过已完成的）。
-                       示例: target_samples=['sample1', 'sample2'] 或 target_samples=None
+        target_samples: Optional list of sample IDs to process. If None, the
+            script runs in resume mode and processes all unfinished samples.
+            Completed samples are skipped in both modes.
     """
 
-    # 配置参数
+    # Configuration.
     hest_data_dir = "/data/yujk/hovernet2feature/HEST/hest_data"
     output_dir = "/data/yujk/hovernet2feature/hest_dinov3_other_cancer"
 
-    # 确保输出目录存在
+    # Ensure output directory exists.
     os.makedirs(output_dir, exist_ok=True)
 
-    # 获取所有可用的HEST样本
+    # Discover available samples.
     all_samples = get_all_hest_samples(hest_data_dir)
     print(f"\n发现 {len(all_samples)} 个可用样本: {all_samples}")
 
-    # 如果指定了目标样本列表，验证并过滤
+    # If a target sample list is provided, validate/filter it.
     if target_samples is not None:
         if not isinstance(target_samples, (list, tuple)):
-            raise ValueError("target_samples 必须是列表或元组")
-        # 转换为列表并去重
+            raise ValueError("target_samples must be a list or tuple")
+        # Deduplicate.
         target_samples = list(set(target_samples))
-        # 验证样本是否存在
+        # Validate existence.
         invalid_samples = [s for s in target_samples if s not in all_samples]
         if invalid_samples:
             print(f"⚠️  警告: 以下样本不存在，将被忽略: {invalid_samples}")
-        # 只保留存在的样本
+        # Keep valid samples only.
         target_samples = [s for s in target_samples if s in all_samples]
         if not target_samples:
             print("❌ 错误: 指定的样本列表中没有任何有效样本")
             return
         print(f"\n📋 指定处理样本模式: 将处理 {len(target_samples)} 个指定样本")
         print(f"   指定样本列表: {sorted(target_samples)}")
-        # 使用指定的样本列表作为基础
+        # Use the specified list as the candidate set.
         candidate_samples = target_samples
     else:
         print(f"\n🔄 自动断点续传模式: 将处理所有未完成的样本")
         candidate_samples = all_samples
 
-    # 加载处理进度
+    # Load progress state.
     progress = load_progress(output_dir)
     completed_samples = set(progress.get('completed_samples', []))
     failed_samples = set(progress.get('failed_samples', []))
 
-    # 检查文件系统中已完成的样本（带完整性验证）
+    # Validate outputs on disk (integrity check).
     print(f"\n=== 验证已存在文件的完整性 ===")
     file_completed_samples = set()
     incomplete_samples = []
     
     for sample_id in candidate_samples:
-        # 获取期望的细胞数量
+        # Expected cell count from segmentation file (best-effort).
         expected_num_cells = get_expected_num_cells(hest_data_dir, sample_id)
         
-        # 验证文件完整性
+        # Validate file integrity.
         if is_sample_completed(output_dir, sample_id, expected_num_cells):
             file_completed_samples.add(sample_id)
         else:
-            # 检查文件是否存在（即使不完整）
+            # Track incomplete-but-existing outputs.
             output_file = os.path.join(
                 output_dir, f"{sample_id}_combined_features.npz")
             if os.path.exists(output_file):
                 incomplete_samples.append(sample_id)
     
-    # 自动修复不完整的文件
+    # Auto-fix incomplete outputs by deleting and reprocessing.
     if incomplete_samples:
         print(f"\n⚠️  发现 {len(incomplete_samples)} 个不完整的文件，将自动删除并重新处理:")
         for sample_id in incomplete_samples:
             print(f"  - {sample_id}")
             remove_incomplete_files(output_dir, sample_id)
 
-    # 合并进度信息
+    # Merge progress sources.
     all_completed = completed_samples.union(file_completed_samples)
 
-    # 确定需要处理的样本（从候选样本中排除已完成的）
+    # Determine remaining samples.
     remaining_samples = [s for s in candidate_samples if s not in all_completed]
 
     print(f"\n=== 处理状态 ===")
@@ -1534,14 +1459,14 @@ def main_independent_pca_extraction(target_samples=None):
             print("✅ 所有样本已处理完成！")
         return
 
-    # 询问是否从断点继续（仅在自动模式下且有待处理样本时）
+    # Optional prompt to resume (auto mode only).
     if target_samples is None and all_completed:
         print(f"\n检测到 {len(all_completed)} 个已完成的样本")
         try:
             resume = input("是否从断点继续处理剩余样本？(y/n, 默认y): ").strip().lower()
             if resume in ['n', 'no']:
                 print("用户选择重新开始处理")
-                # 重置进度
+                # Reset progress.
                 remaining_samples = candidate_samples
                 progress = {'completed_samples': [], 'failed_samples': []}
                 save_progress(output_dir, progress)
@@ -1549,7 +1474,7 @@ def main_independent_pca_extraction(target_samples=None):
             print("\n用户取消操作")
             return
 
-    test_samples = remaining_samples  # 只处理剩余样本
+    test_samples = remaining_samples  # Process remaining samples only.
 
     print("=== HEST空转数据独立PCA特征提取（DINOv3）- 断点续传版 ===")
     print(f"数据目录: {hest_data_dir}")
@@ -1558,18 +1483,18 @@ def main_independent_pca_extraction(target_samples=None):
     print(f"使用级别1分辨率WSI (~0.5μm/pixel)")
     print(f"48×48像素patches，覆盖24×24μm物理区域")
 
-    # 创建特征提取器（使用优化参数）
+    # Create the feature extractor (auto-tuned parameters).
     try:
-        # 自动检测最佳参数
-        num_workers = min(mp.cpu_count(), 16)  # 限制最大16个线程
+        # Auto-tune concurrency (cap threads).
+        num_workers = min(mp.cpu_count(), 16)
 
-        # GPU内存检测
+        # GPU memory-based batch sizing.
         if torch.cuda.is_available():
             gpu_memory_gb = torch.cuda.get_device_properties(
                 0).total_memory / 1024**3
             print(f"检测到GPU内存: {gpu_memory_gb:.1f} GB")
 
-            # 根据GPU内存自动调整批处理大小
+            # Adjust batch sizes based on GPU memory.
             if gpu_memory_gb >= 24:  # 24GB+
                 dino_batch_size = 512
                 cell_batch_size = 100000
@@ -1595,45 +1520,45 @@ def main_independent_pca_extraction(target_samples=None):
         print(f"  - DINOv3批大小: {dino_batch_size}")
         print(f"  - 细胞批大小: {cell_batch_size:,}")
 
-        # 设置 DINOv3 模型路径
+        # DINOv3 weights path.
         dinov3_model_path = "/data/yujk/hovernet2feature/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
 
         extractor = HESTCellFeatureExtractor(
             hest_data_dir=hest_data_dir,
             output_dir=output_dir,
-            dinov3_model_path=dinov3_model_path,  # 传入DINOv3模型路径
-            bulk_pca_model_path=None,  # 不使用bulk PCA
+            dinov3_model_path=dinov3_model_path,
+            bulk_pca_model_path=None,
             device='cuda' if torch.cuda.is_available() else 'cpu',
-            dinov3_feature_dim=1024,  # DINOv3-L 特征维度
+            dinov3_feature_dim=1024,
             dino_batch_size=dino_batch_size,
             cell_batch_size=cell_batch_size,
             num_workers=num_workers,
-            assign_spot=True  # 启用spot分配，为每个细胞计算spot_index
+            assign_spot=True
         )
 
-        # 处理所有空转样本
+        # Process all remaining samples.
         print(f"\n=== 开始处理 {len(test_samples)} 个空转样本 ===")
         print(
             f"准备处理样本: {', '.join(test_samples[:5])}{'...' if len(test_samples) > 5 else ''}")
 
         sample_results = []
 
-        # 性能监控
+        # Performance tracking.
         import time
         start_time = time.time()
 
-        # 处理每个样本（使用独立PCA + 断点续传）
+        # Process each sample (independent PCA + resume support).
         for sample_idx, sample_id in enumerate(test_samples):
             print(f"\n样本处理进度: {sample_idx+1}/{len(test_samples)}")
             print(f"{'='*50}")
             print(f"正在处理空转样本: {sample_id}")
             print(f"{'='*50}")
 
-            # 检查样本是否已完成（带完整性验证）
+            # Skip if already completed (with integrity validation).
             expected_num_cells = get_expected_num_cells(hest_data_dir, sample_id)
             if is_sample_completed(output_dir, sample_id, expected_num_cells):
                 print(f"✅ 样本 {sample_id} 已完成且文件完整，跳过")
-                # 添加到结果中以便统计
+                # Add to results for summary stats.
                 try:
                     output_file = os.path.join(
                         output_dir, f"{sample_id}_combined_features.npz")
@@ -1648,13 +1573,12 @@ def main_independent_pca_extraction(target_samples=None):
                     })
                 except Exception as e:
                     print(f"⚠️  读取已完成样本 {sample_id} 信息失败: {e}")
-                    # 如果读取失败，可能是文件损坏，删除并重新处理
                     print(f"   将删除损坏的文件并重新处理")
                     remove_incomplete_files(output_dir, sample_id)
                 else:
                     continue
 
-            # 异常处理：如果某个样本处理失败，记录并继续处理下一个
+            # Failure handling: record and continue with next sample.
             try:
                 sample_start_time = time.time()
                 result = extractor.process_sample_with_independent_pca(
@@ -1664,14 +1588,14 @@ def main_independent_pca_extraction(target_samples=None):
 
                 sample_results.append(result)
 
-                # 更新进度：添加到已完成列表
+                # Update progress: add to completed list.
                 current_progress = load_progress(output_dir)
                 if 'completed_samples' not in current_progress:
                     current_progress['completed_samples'] = []
                 if sample_id not in current_progress['completed_samples']:
                     current_progress['completed_samples'].append(sample_id)
 
-                # 从失败列表中移除（如果存在）
+                # Remove from failed list if present.
                 if 'failed_samples' in current_progress and sample_id in current_progress['failed_samples']:
                     current_progress['failed_samples'].remove(sample_id)
 
@@ -1683,7 +1607,7 @@ def main_independent_pca_extraction(target_samples=None):
                 print(f"  - 特征文件: {result['output_file']}")
                 print(f"  - 处理速度: {result['num_cells']/sample_time:.0f} 细胞/秒")
 
-                # 实时资源监控
+                # Live resource snapshot.
                 resource_info = extractor.monitor_resources()
                 print(f"  - 当前资源使用: {resource_info}")
 
@@ -1693,7 +1617,7 @@ def main_independent_pca_extraction(target_samples=None):
                 import traceback
                 print(f"   错误详情: {traceback.format_exc()[:300]}...")
 
-                # 更新进度：添加到失败列表
+                # Update progress: add to failed list.
                 current_progress = load_progress(output_dir)
                 if 'failed_samples' not in current_progress:
                     current_progress['failed_samples'] = []
@@ -1701,21 +1625,21 @@ def main_independent_pca_extraction(target_samples=None):
                     current_progress['failed_samples'].append(sample_id)
                 save_progress(output_dir, current_progress)
 
-                continue  # 跳过失败的样本，继续处理下一个
+                continue  # Skip failed sample and continue.
 
-        # 最终进度更新
+        # Final progress update.
         final_progress = load_progress(output_dir)
         if 'completed_samples' not in final_progress:
             final_progress['completed_samples'] = []
 
-        # 确保所有成功处理的样本都在已完成列表中
+        # Ensure all successful samples are listed as completed.
         for result in sample_results:
             if result['sample_id'] not in final_progress['completed_samples']:
                 final_progress['completed_samples'].append(result['sample_id'])
 
         save_progress(output_dir, final_progress)
 
-        # 检查是否有成功处理的样本
+        # Abort if nothing succeeded.
         if not sample_results:
             print("\n❌ 所有样本处理失败，无法继续")
             return
@@ -1725,12 +1649,12 @@ def main_independent_pca_extraction(target_samples=None):
                 set([r['sample_id'] for r in sample_results])
             print(f"\n⚠️  以下样本处理失败: {failed_samples}")
 
-        # 计算总处理时间和性能统计
+        # Aggregate timing and throughput stats.
         end_time = time.time()
         total_time = end_time - start_time
         total_cells = sum(result['num_cells'] for result in sample_results)
 
-        # 批量处理性能报告
+        # Batch performance report.
         print(f"\n{'='*80}")
         print("=== 空转数据独立PCA处理完成 - 性能报告 ===")
         print(f"{'='*80}")
@@ -1767,7 +1691,7 @@ def main_independent_pca_extraction(target_samples=None):
             print(
                 f"  - {result['sample_id']}: {result['num_cells']:,}细胞, {result['final_feature_dim']}维特征")
 
-        # 最终资源使用统计
+        # Final resource usage snapshot.
         final_resource_info = extractor.monitor_resources()
         print(f"\n  - 最终资源使用: {final_resource_info}")
 
@@ -1776,7 +1700,7 @@ def main_independent_pca_extraction(target_samples=None):
         import traceback
         traceback.print_exc()
 
-        # 初始化sample_results以防止UnboundLocalError
+        # Ensure locals exist to avoid UnboundLocalError in the exception path.
         if 'sample_results' not in locals():
             sample_results = []
         if 'test_samples' not in locals():
@@ -1803,28 +1727,27 @@ def main_independent_pca_extraction(target_samples=None):
 
 
 if __name__ == "__main__":
-    # 运行空转数据独立PCA特征提取（仅DINOv3特征）
+    # Run independent-PCA extraction (DINOv3 features only).
     print("HEST细胞特征提取器 - 仅使用DINOv3特征（独立PCA）")
     print("特征配置: DINOv3 768维 -> PCA降维至128维")
     print("不包含形态特征，每个样本独立训练PCA")
     print()
     
     # ============================================================
-    # 使用说明：
-    # 1. 自动断点续传模式（处理所有未完成的样本）：
+    # Usage:
+    # 1) Resume mode (process all unfinished samples):
     #    main_independent_pca_extraction()
-    #    或
-    #    main_independent_pca_extraction(target_samples=None)
+    #    or main_independent_pca_extraction(target_samples=None)
     #
-    # 2. 指定样本模式（只处理指定的样本）：
-    #    main_independent_pca_extraction(target_samples=['sample1', 'sample2', 'sample3'])
-    #    注意：即使指定了样本列表，已完成的样本仍会被自动跳过
+    # 2) Targeted mode (process only selected samples):
+    #    main_independent_pca_extraction(target_samples=['sample1', 'sample2'])
+    #    Note: completed samples are skipped in both modes.
     # ============================================================
     
-    # 方式1: 自动断点续传处理所有未完成的样本（默认模式）
+    # Option 1: resume mode (default).
     target_samples = None
     
-    # 方式2: 指定要处理的样本列表（取消下面的注释并修改样本ID）
+    # Option 2: specify sample IDs (edit as needed).
     target_samples = [
         "INT1","INT10","INT11","INT12","INT13","INT14","INT15","INT16","INT17","INT18",
         "INT19","INT2","INT20","INT21","INT22","INT23","INT24","INT3","INT4","INT5",
@@ -1840,7 +1763,7 @@ if __name__ == "__main__":
         "MEND156","MEND157","MEND158","MEND159","MEND160","MEND161","MEND162",
         "ZEN36","ZEN40","ZEN48","ZEN49",
         "TENX115","TENX117"
-    ]  # 替换为实际的样本ID
+    ]  # Replace with real sample IDs.
     
     try:
         main_independent_pca_extraction(target_samples=target_samples)

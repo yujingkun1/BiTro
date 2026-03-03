@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-HEST数据集图构建脚本 - 直接读取HEST数据文件（无需HEST库）
-基于HEST数据格式构建两层次图结构：
-1. Spot内图：基于CellViT细胞分割构建细胞级图
-2. Spot间图：基于空转数据的spot邻近关系建图
+Graph construction for the HEST spatial transcriptomics dataset (BiTro).
 
-直接读取HEST数据文件格式：
-- st/*.h5ad: AnnData格式的空转数据
-- cellvit_seg/*.parquet: CellViT细胞分割数据
-- metadata/*.json: 样本元数据
+This script builds a two-level graph representation from the HEST on-disk
+format without requiring the HEST Python API:
+1) Intra-spot graphs: cell-level graphs within each spot (from CellViT
+   segmentation / per-cell features).
+2) Inter-spot graph: spot-level kNN graph based on spot spatial coordinates.
+
+Expected input layout under ``hest_data_dir``:
+- ``st/*.h5ad``: AnnData files containing spot-level expression + coordinates
+- ``cellvit_seg/*.parquet``: CellViT segmentation outputs (optional)
+- ``metadata/*.json``: sample metadata (optional)
 """
 
 import os
@@ -25,31 +28,31 @@ import scanpy as sc
 import shapely.wkb as wkb
 warnings.filterwarnings("ignore")
 
-# 设置scanpy不显示过多信息
+# Reduce scanpy verbosity to avoid excessive console output.
 sc.settings.verbosity = 1
 
 
 class HESTDirectReader:
-    """直接读取HEST数据文件的图构建器"""
+    """Build HEST intra-/inter-spot graphs from files on disk."""
 
     def __init__(self,
                  hest_data_dir,
                  sample_ids,
-                 features_dir=None,             # 深度特征文件目录
-                 inter_spot_k_neighbors=6):          # spot间k近邻数量
+                 features_dir=None,
+                 inter_spot_k_neighbors=6):
 
         self.hest_data_dir = hest_data_dir
         self.sample_ids = sample_ids if isinstance(
             sample_ids, list) else [sample_ids]
-        self.features_dir = features_dir  # 深度特征文件目录
+        self.features_dir = features_dir
         self.inter_spot_k_neighbors = inter_spot_k_neighbors
 
         self.sample_data = {}
         self.processed_data = {}
-        self.deep_features = {}  # 深度特征缓存
+        self.deep_features = {}
 
     def load_sample_data(self):
-        """直接加载HEST数据文件"""
+        """Load AnnData, metadata, and optional segmentation/features for samples."""
         print("=== 直接加载HEST数据文件 ===")
 
         for sample_id in self.sample_ids:
@@ -58,7 +61,7 @@ class HESTDirectReader:
 
                 sample_info = {}
 
-                # 1. 加载AnnData文件
+                # 1) AnnData
                 st_file = os.path.join(
                     self.hest_data_dir, "st", f"{sample_id}.h5ad")
                 if os.path.exists(st_file):
@@ -70,7 +73,7 @@ class HESTDirectReader:
                     print(f"  - 警告: 未找到AnnData文件: {st_file}")
                     continue
 
-                # 2. 加载元数据
+                # 2) Metadata
                 metadata_file = os.path.join(
                     self.hest_data_dir, "metadata", f"{sample_id}.json")
                 if os.path.exists(metadata_file):
@@ -81,7 +84,7 @@ class HESTDirectReader:
                 else:
                     sample_info['metadata'] = {}
 
-                # 3. 加载细胞分割数据
+                # 3) Cell segmentation (optional)
                 cellvit_file = os.path.join(
                     self.hest_data_dir, "cellvit_seg", f"{sample_id}_cellvit_seg.parquet")
                 if os.path.exists(cellvit_file):
@@ -92,7 +95,7 @@ class HESTDirectReader:
                     print(f"  - 警告: 未找到细胞分割文件: {cellvit_file}")
                     sample_info['cellvit'] = None
 
-                # 4. 检查图像patches
+                # 4) Image patches (optional)
                 patches_file = os.path.join(
                     self.hest_data_dir, "patches", f"{sample_id}.h5")
                 if os.path.exists(patches_file):
@@ -110,38 +113,38 @@ class HESTDirectReader:
 
         print(f"成功加载 {len(self.sample_data)} 个样本")
 
-        # 如果指定了深度特征目录，加载深度特征
+        # Optional deep features.
         if self.features_dir:
             self.load_deep_features()
 
     def load_deep_features(self):
-        """加载深度特征文件"""
+        """Load per-cell deep feature NPZ files for each sample (optional)."""
         print("=== 加载深度特征文件 ===")
 
         for sample_id in self.sample_ids:
             try:
-                # 查找样本的特征文件
+                # Locate the sample's feature file.
                 feature_file = os.path.join(
                     self.features_dir, f"{sample_id}_combined_features.npz")
 
                 if os.path.exists(feature_file):
                     print(f"加载样本 {sample_id} 的深度特征...")
 
-                    # 加载特征数据 - 添加allow_pickle=True来处理metadata
+                    # Use allow_pickle=True because metadata may store objects/dicts.
                     data = np.load(feature_file, allow_pickle=True)
                     features = data['features'].astype(
-                        np.float32)  # [N, D] 的深度特征
+                        np.float32)
                     positions = data['positions'].astype(
                         np.float32) if 'positions' in data else None
                     cell_index = data['cell_index'] if 'cell_index' in data else None
                     spot_ptr = data['spot_ptr'] if 'spot_ptr' in data else None
                     spot_index = data['spot_index'] if 'spot_index' in data else None
 
-                    # 安全处理metadata
+                    # Best-effort metadata parsing.
                     try:
                         if 'metadata' in data:
                             metadata_array = data['metadata']
-                            # 处理0维numpy array的metadata
+                            # Handle 0-d numpy arrays that wrap dict-like metadata.
                             if metadata_array.ndim == 0:
                                 metadata = metadata_array.item() if metadata_array.dtype == object else {}
                             else:
@@ -153,7 +156,7 @@ class HESTDirectReader:
                         print(f"    警告: metadata解析失败: {meta_e}")
                         metadata = {}
 
-                    # 对齐检查与裁剪（如有需要）
+                    # Align lengths if features/positions mismatch.
                     n_feat = features.shape[0]
                     if positions is not None:
                         n_pos = positions.shape[0]
@@ -165,12 +168,12 @@ class HESTDirectReader:
                             positions = positions[:n_min]
                             n_feat = n_min
 
-                    # 读取可选的聚类标签（若已由聚类脚本写回）
+                    # Optional clustering labels written by the clustering script.
                     cluster_labels = None
                     try:
                         if 'cluster_labels' in data:
                             cluster_labels = data['cluster_labels']
-                            # 类型与长度检查
+                            # Type/shape sanity checks.
                             if getattr(cluster_labels, 'ndim', 1) != 1 or cluster_labels.shape[0] != features.shape[0]:
                                 print("    警告: cluster_labels 维度或长度与 features 不一致，将忽略")
                                 cluster_labels = None
@@ -202,24 +205,24 @@ class HESTDirectReader:
         print(f"成功加载 {len(self.deep_features)} 个样本的深度特征")
 
     def extract_cell_features_from_cellvit(self, sample_id):
-        """从CellViT分割数据提取细胞特征"""
+        """Extract a cell table with coordinates and simple geometry features."""
         print(f"提取样本 {sample_id} 的细胞特征...")
 
         sample_info = self.sample_data[sample_id]
         cellvit_df = sample_info.get('cellvit')
 
-        # 如果深度特征中存在positions，则优先使用以确保与特征严格对齐
+        # Prefer NPZ positions when available to guarantee alignment with features.
         deep = self.deep_features.get(sample_id) if hasattr(
             self, 'deep_features') else None
         if deep is not None and deep.get('positions') is not None:
             positions = deep['positions']
             n = positions.shape[0]
             print(f"  使用NPZ中的positions作为细胞坐标，对齐长度: {n}")
-            # 若没有cellvit或长度不匹配，仅使用positions生成基础表
+            # If CellViT data is missing or misaligned, build a minimal table from positions only.
             cells_data = []
             for idx in range(n):
                 x, y = float(positions[idx, 0]), float(positions[idx, 1])
-                # 面积与周长无法从positions推断，使用默认值占位（不会影响深度特征分支）
+                # Geometry cannot be recovered from positions alone; keep placeholders.
                 cells_data.append({
                     'cell_id': idx,
                     'x': x,
@@ -234,7 +237,7 @@ class HESTDirectReader:
             print(f"  警告: 样本 {sample_id} 无细胞分割数据且无positions，使用spot中心点")
             return self.create_spot_based_features(sample_info['adata'])
 
-        # 提取细胞特征
+        # Parse geometry and extract centroid + simple shape statistics.
         cells_data = []
 
         print(f"  正在解析 {len(cellvit_df)} 个细胞的几何数据...")
@@ -243,26 +246,26 @@ class HESTDirectReader:
             try:
                 row = cellvit_df.iloc[idx]
 
-                # 解析WKB格式的geometry
+                # Parse WKB geometry if available.
                 if 'geometry' in cellvit_df.columns:
                     geom_bytes = row['geometry']
                     geom = wkb.loads(geom_bytes)
 
-                    # 获取中心点
+                    # Centroid
                     centroid = geom.centroid
                     cell_x, cell_y = centroid.x, centroid.y
 
-                    # 计算面积和周长
+                    # Area and perimeter
                     cell_area = geom.area
                     cell_perimeter = geom.length
 
                 else:
-                    # 如果没有geometry列，使用默认值
+                    # If the geometry column is missing, use placeholder values.
                     cell_x, cell_y = float(idx % 100), float(idx // 100)
                     cell_area = 100.0
                     cell_perimeter = 35.4
 
-                # 计算形状特征
+                # Shape compactness-like feature.
                 cell_shape_feature = cell_perimeter**2 / \
                     (4 * np.pi * cell_area) if cell_area > 0 else 1.0
 
@@ -276,9 +279,9 @@ class HESTDirectReader:
                 })
 
             except Exception as e:
-                if idx < 10:  # 只打印前10个错误
+                if idx < 10:
                     print(f"    警告: 处理细胞 {idx} 时出错: {e}")
-                # 使用默认值
+                # Fallback defaults.
                 cells_data.append({
                     'cell_id': idx,
                     'x': float(idx % 100),
@@ -294,7 +297,7 @@ class HESTDirectReader:
 
         cells_df = pd.DataFrame(cells_data)
 
-        # 打印坐标范围信息
+        # Basic coordinate range logging for debugging.
         print(f"  提取了 {len(cells_df)} 个细胞的特征")
         print(
             f"  细胞坐标范围: X[{cells_df['x'].min():.1f}, {cells_df['x'].max():.1f}], Y[{cells_df['y'].min():.1f}, {cells_df['y'].max():.1f}]")
@@ -302,7 +305,7 @@ class HESTDirectReader:
         return cells_df
 
     def create_spot_based_features(self, adata):
-        """当没有细胞分割时，基于spot创建伪细胞特征"""
+        """Fallback: create pseudo-cells at spot centers when segmentation is missing."""
         spots_coords = adata.obsm['spatial']
 
         cells_data = []
@@ -311,36 +314,36 @@ class HESTDirectReader:
                 'cell_id': spot_idx,
                 'x': float(x),
                 'y': float(y),
-                'area': 100.0,  # 假设固定面积
-                'perimeter': 35.4,  # 对应圆形的周长
-                'shape_feature': 1.0  # 圆形的形状特征
+                'area': 100.0,  # Placeholder area.
+                'perimeter': 35.4,  # Placeholder perimeter (roughly circular).
+                'shape_feature': 1.0  # Placeholder shape feature.
             })
 
         return pd.DataFrame(cells_data)
 
     def assign_cells_to_spots(self, sample_id, cells_df):
-        """将细胞分配到spots"""
+        """Assign cells to spots using either direct mapping (Xenium) or distance rules."""
         print(f"为样本 {sample_id} 分配细胞到spots...")
 
         adata = self.sample_data[sample_id]['adata']
         metadata = self.sample_data[sample_id]['metadata']
         st_technology = metadata.get('st_technology', 'Unknown')
 
-        # Xenium技术：每个细胞就是一个spot
+        # Xenium: treat each cell as a spot and map 1-to-1 (up to min length).
         if st_technology == 'Xenium':
             print(f"  检测到Xenium技术，直接将细胞映射为spots...")
             cells_df = cells_df.copy()
 
-            # 获取spot坐标
+            # Spot coordinates.
             spots_coords = adata.obsm['spatial']
             print(f"  细胞数量: {len(cells_df)}, Spot数量: {len(spots_coords)}")
 
-            # 对于Xenium，直接一一对应（取较小的数量）
+            # Direct 1-to-1 mapping (use the smaller count).
             min_count = min(len(cells_df), len(spots_coords))
             cells_df['spot_assignment'] = -1
             cells_df['distance_to_spot'] = 0.0
 
-            # 前min_count个细胞直接分配到对应的spot
+            # Assign first min_count cells to matching spot indices.
             cells_df.iloc[:min_count, cells_df.columns.get_loc(
                 'spot_assignment')] = range(min_count)
 
@@ -349,28 +352,27 @@ class HESTDirectReader:
 
             return cells_df
 
-        # 其他技术：使用距离匹配
-        # 获取spot坐标
+        # Other technologies: distance-based matching.
         spots_coords = adata.obsm['spatial']
 
-        # 打印调试信息
+        # Coordinate range logging can be useful when matching fails.
         print(
             f"  Spots坐标范围: X[{spots_coords[:, 0].min():.1f}, {spots_coords[:, 0].max():.1f}], Y[{spots_coords[:, 1].min():.1f}, {spots_coords[:, 1].max():.1f}]")
         print(
             f"  细胞坐标范围: X[{cells_df['x'].min():.1f}, {cells_df['x'].max():.1f}], Y[{cells_df['y'].min():.1f}, {cells_df['y'].max():.1f}]")
 
-        # 为每个细胞分配最近的spot
+        # Assign each cell to its nearest spot if within a radius threshold.
         cells_df = cells_df.copy()
         cells_df['spot_assignment'] = -1
         cells_df['distance_to_spot'] = float('inf')
 
-        # 处理所有细胞（移除采样限制）
+        # Process all cells (batched to control memory).
         print(f"  正在为 {len(cells_df)} 个细胞分配到 {len(spots_coords)} 个spots...")
 
         assigned_count = 0
         distances_list = []
 
-        # 分批处理以避免内存问题
+        # Batch processing to reduce peak memory.
         batch_size = 200000
         num_batches = (len(cells_df) + batch_size - 1) // batch_size
 
@@ -385,36 +387,36 @@ class HESTDirectReader:
             for cell_idx, cell_row in tqdm(batch_cells.iterrows(), total=len(batch_cells), desc=f"  批次{batch_idx+1}"):
                 cell_pos = np.array([cell_row['x'], cell_row['y']])
 
-                # 计算到所有spots的距离
+                # Distances to all spots.
                 distances = np.linalg.norm(spots_coords - cell_pos, axis=1)
                 nearest_spot_idx = np.argmin(distances)
                 nearest_distance = distances[nearest_spot_idx]
 
                 distances_list.append(nearest_distance)
 
-                # 使用像素大小转换距离
+                # Convert pixel distance to microns.
                 pixel_size_um = metadata.get(
-                    'pixel_size_um_estimated', 0.5)  # 默认0.5微米/像素
+                    'pixel_size_um_estimated', 0.5)  # Default: 0.5 um/pixel.
                 distance_um = nearest_distance * pixel_size_um
 
-                # 从元数据获取spot半径（像素 -> 微米）
+                # Spot radius in microns (heuristic).
                 spot_diameter_px = metadata.get('spot_diameter', None)
 
                 if pd.isna(spot_diameter_px) or spot_diameter_px is None:
-                    # 其他未知技术使用默认值
-                    spot_radius_um = 25.0  # 默认25微米半径
+                    # Unknown technology: use a default radius.
+                    spot_radius_um = 25.0  # Default radius: 25 um.
                 else:
-                    # Visium等基于spot的技术
+                    # Spot-based technologies such as Visium.
                     base_radius_um = (spot_diameter_px / 2.0) * \
-                        pixel_size_um  # 基础半径
-                    spot_radius_um = base_radius_um * 1.5  # 使用1.5倍半径增加匹配范围
+                        pixel_size_um  # Base radius.
+                    spot_radius_um = base_radius_um * 1.5  # Expand radius to improve matching.
 
                 if distance_um <= spot_radius_um:
                     cells_df.at[cell_idx, 'spot_assignment'] = nearest_spot_idx
                     cells_df.at[cell_idx, 'distance_to_spot'] = distance_um
                     assigned_count += 1
 
-        # 统计分配结果
+        # Summary statistics.
         assigned_cells = cells_df[cells_df['spot_assignment'] >= 0]
 
         print(f"  成功分配: {len(assigned_cells)}/{len(cells_df)} 细胞")
@@ -438,11 +440,11 @@ class HESTDirectReader:
         return cells_df
 
     def build_intra_spot_graphs(self, sample_id, intra_spot_k_neighbors=8):
-        """构建spot内的图结构（基于细胞）- spot内所有细胞可连接，使用k近邻"""
+        """Build cell-level graphs within each spot using kNN connectivity."""
         print(f"构建样本 {sample_id} 的spot内图...")
 
         cells_df = self.processed_data[sample_id]['cells']
-        # 如果有spot分组信息（来自深度特征spot_ptr或spot_index），尝试优先使用
+        # If deep features provide explicit spot grouping, prefer it to avoid misalignment.
         deep = self.deep_features.get(sample_id) if hasattr(
             self, 'deep_features') else None
         group_by_spot = None
@@ -450,11 +452,11 @@ class HESTDirectReader:
             spot_ptr = deep.get('spot_ptr')
             spot_index = deep.get('spot_index')
             if spot_ptr is not None and isinstance(spot_ptr, (np.ndarray, list)) and len(spot_ptr) >= 2:
-                # 通过ptr映射构造字典：spot_idx -> 索引范围
+                # Map spot_idx -> (start, end) using ptr.
                 group_by_spot = {int(si): (int(spot_ptr[si]), int(
                     spot_ptr[si+1])) for si in range(len(spot_ptr)-1)}
             elif spot_index is not None and isinstance(spot_index, np.ndarray):
-                # 通过index分组
+                # Group by explicit spot_index.
                 group_by_spot = {}
                 for i, si in enumerate(spot_index.tolist()):
                     si = int(si)
@@ -463,15 +465,15 @@ class HESTDirectReader:
 
         intra_spot_graphs = {}
 
-        # 按spot分组处理
+        # Process spot by spot.
         for spot_idx in tqdm(assigned_cells['spot_assignment'].unique(), desc="构建spot内图"):
             spot_cells = assigned_cells[assigned_cells['spot_assignment'] == spot_idx].copy(
             )
 
             if len(spot_cells) < 2:
-                # 单个或无细胞的spot
+                # Spots with 0 or 1 cell.
                 if len(spot_cells) == 1:
-                    # 创建单节点图
+                    # Single-node graph.
                     cell_row = spot_cells.iloc[0]
                     cell_features = self.extract_cell_feature_vector(
                         cell_row, sample_id, cell_row.name)
@@ -480,7 +482,7 @@ class HESTDirectReader:
                     pos = torch.tensor(
                         [[cell_row['x'], cell_row['y']]], dtype=torch.float32)
                     graph = Data(x=x, edge_index=edge_index, pos=pos)
-                    # 如果存在聚类标签，附加到图
+                    # Attach clustering labels when available.
                     if deep is not None and deep.get('cluster_labels') is not None:
                         cls = deep['cluster_labels']
                         if cell_row.name < len(cls):
@@ -490,8 +492,7 @@ class HESTDirectReader:
                     intra_spot_graphs[int(spot_idx)] = graph
                 continue
 
-            # 提取位置和特征
-            # 默认使用cells_df计算位置与特征
+            # Default: derive positions/features from the cell table.
             positions = spot_cells[['x', 'y']].values
             cell_features = np.array([
                 self.extract_cell_feature_vector(row, sample_id, row.name)
@@ -499,7 +500,7 @@ class HESTDirectReader:
             ])
             cluster_slice = None
 
-            # 若深度特征提供了严格按spot划分的索引，且长度匹配，优先使用以避免对齐偏差
+            # Prefer deep features/positions sliced by spot grouping when available.
             if deep is not None and deep.get('features') is not None and deep.get('positions') is not None:
                 feats_np = deep['features']
                 pos_np = deep['positions']
@@ -524,7 +525,7 @@ class HESTDirectReader:
                                 if len(valid_cls) == len(idxs):
                                     cluster_slice = cls_np[idxs]
 
-            # spot内所有细胞都可以连接，使用k近邻控制连接密度
+            # kNN connectivity within the spot.
             k = min(intra_spot_k_neighbors, len(spot_cells) - 1)
 
             if k > 0:
@@ -533,7 +534,7 @@ class HESTDirectReader:
 
                 edges = []
                 for i, neighbors in enumerate(indices):
-                    for neighbor in neighbors[1:]:  # 跳过自己
+                    for neighbor in neighbors[1:]:
                         edges.extend([[i, neighbor], [neighbor, i]])
 
                 if edges:
@@ -544,12 +545,12 @@ class HESTDirectReader:
             else:
                 edge_index = torch.empty((2, 0), dtype=torch.long)
 
-            # 创建图数据
+            # Build graph.
             x = torch.tensor(cell_features, dtype=torch.float32)
             pos = torch.tensor(positions, dtype=torch.float32)
 
             graph = Data(x=x, edge_index=edge_index, pos=pos)
-            # 附加聚类标签（若可用且长度匹配）
+            # Attach clustering labels when available and aligned.
             if cluster_slice is not None:
                 try:
                     cls_t = torch.as_tensor(cluster_slice, dtype=torch.long)
@@ -564,15 +565,15 @@ class HESTDirectReader:
         return intra_spot_graphs
 
     def extract_cell_feature_vector(self, cell_row, sample_id=None, cell_idx=None):
-        """提取细胞特征向量（支持深度特征）"""
+        """Extract a feature vector for a cell (deep features preferred)."""
 
-        # 优先使用深度特征
+        # Prefer deep features when available.
         if sample_id and sample_id in self.deep_features and cell_idx is not None:
             deep_features = self.deep_features[sample_id]['features']
             if cell_idx < len(deep_features):
-                return deep_features[cell_idx].astype(np.float32)  # 返回128维深度特征
+                return deep_features[cell_idx].astype(np.float32)
 
-        # 回退到简单几何特征
+        # Fallback to simple geometric features and pad/truncate to 128 dims.
         features = [
             cell_row['area'],
             cell_row['perimeter'],
@@ -581,44 +582,40 @@ class HESTDirectReader:
             cell_row['y']
         ]
 
-        # 归一化处理
         features = np.array(features, dtype=np.float32)
 
-        # 扩展到目标维度
-        target_dim = 128  # 改为128以匹配深度特征维度
+        target_dim = 128
         if len(features) < target_dim:
-            # 零填充
             features = np.pad(
                 features, (0, target_dim - len(features)), mode='constant')
         elif len(features) > target_dim:
-            # 截断
             features = features[:target_dim]
 
         return features
 
     def build_inter_spot_graph(self, sample_id):
-        """构建spot间的图结构"""
+        """Build a spot-level kNN graph from spot coordinates."""
         print(f"构建样本 {sample_id} 的spot间图...")
 
         adata = self.sample_data[sample_id]['adata']
 
-        # 获取spot位置
+        # Spot coordinates.
         spot_positions = adata.obsm['spatial']
 
-        # 使用k近邻构建spot间连接
+        # kNN connectivity.
         nbrs = NearestNeighbors(
             n_neighbors=self.inter_spot_k_neighbors+1).fit(spot_positions)
         _, indices = nbrs.kneighbors(spot_positions)
 
-        # 构建边列表
+        # Build undirected edges.
         edges = []
         for i, neighbors in enumerate(indices):
-            for neighbor in neighbors[1:]:  # 跳过自己
+            for neighbor in neighbors[1:]:
                 edges.extend([[i, neighbor], [neighbor, i]])
 
         edge_index = torch.tensor(np.array(edges).T, dtype=torch.long)
 
-        # spot特征：使用位置特征
+        # Use positions as simple node features.
         spot_features = torch.tensor(spot_positions, dtype=torch.float32)
         pos = torch.tensor(spot_positions, dtype=torch.float32)
 
@@ -630,19 +627,19 @@ class HESTDirectReader:
         return inter_spot_graph
 
     def process_all_samples(self):
-        """处理所有样本"""
+        """Process all loaded samples and populate ``processed_data``."""
         print("=== 处理所有样本 ===")
 
         for sample_id in self.sample_data.keys():
             print(f"\n处理样本: {sample_id}")
 
-            # 提取细胞特征
+            # Extract cell features.
             cells_df = self.extract_cell_features_from_cellvit(sample_id)
 
-            # 分配细胞到spots
+            # Assign cells to spots.
             cells_with_spots = self.assign_cells_to_spots(sample_id, cells_df)
 
-            # 存储处理结果
+            # Store processed outputs.
             self.processed_data[sample_id] = {
                 'cells': cells_with_spots,
                 'adata': self.sample_data[sample_id]['adata']
@@ -651,7 +648,7 @@ class HESTDirectReader:
             print(f"  样本 {sample_id} 处理完成")
 
     def save_graphs(self, output_dir):
-        """保存构建的图"""
+        """Serialize constructed graphs and metadata to disk."""
         print("=== 保存图结构 ===")
 
         if not os.path.exists(output_dir):
@@ -663,18 +660,18 @@ class HESTDirectReader:
         for sample_id in self.processed_data.keys():
             print(f"\n保存样本 {sample_id} 的图...")
 
-            # 构建图
+            # Build graphs.
             intra_spot_graphs = self.build_intra_spot_graphs(
                 sample_id, intra_spot_k_neighbors=8)
             inter_spot_graph = self.build_inter_spot_graph(sample_id)
 
-            # 保存到总的字典中
+            # Save into the aggregated dict.
             all_graphs[sample_id] = {
                 'intra_spot_graphs': intra_spot_graphs,
                 'inter_spot_graph': inter_spot_graph
             }
 
-            # 元数据
+            # Metadata.
             adata = self.sample_data[sample_id]['adata']
             cells_df = self.processed_data[sample_id]['cells']
             metadata = self.sample_data[sample_id]['metadata']
@@ -691,7 +688,7 @@ class HESTDirectReader:
                 'pixel_size_um': metadata.get('pixel_size_um_estimated', 0.5)
             }
 
-        # 保存文件
+        # Output file paths.
         intra_graphs_path = os.path.join(
             output_dir, "hest_intra_spot_graphs.pkl")
         inter_graphs_path = os.path.join(
@@ -700,21 +697,21 @@ class HESTDirectReader:
         processed_data_path = os.path.join(
             output_dir, "hest_processed_data.pkl")
 
-        # 保存spot内图
+        # Save intra-spot graphs.
         with open(intra_graphs_path, 'wb') as f:
             pickle.dump({sid: data['intra_spot_graphs']
                         for sid, data in all_graphs.items()}, f)
 
-        # 保存spot间图
+        # Save inter-spot graphs.
         with open(inter_graphs_path, 'wb') as f:
             pickle.dump({sid: data['inter_spot_graph']
                         for sid, data in all_graphs.items()}, f)
 
-        # 保存元数据
+        # Save metadata.
         with open(metadata_path, 'w') as f:
             json.dump(all_metadata, f, indent=2)
 
-        # 保存处理后的数据
+        # Save processed data.
         with open(processed_data_path, 'wb') as f:
             pickle.dump(self.processed_data, f)
 
@@ -728,18 +725,18 @@ class HESTDirectReader:
 
 
 def main():
-    """主函数"""
+    """Entry point for graph construction."""
 
-    # 配置参数
+    # Configuration.
     hest_data_dir = "/data/yujk/hovernet2feature/HEST/hest_data"
     output_dir = "/data/yujk/hovernet2feature/hest_graphs_dinov3_other_cancer"
 
-    # 深度特征目录（新增）
+    # Optional deep feature directory.
     features_dir = "/data/yujk/hovernet2feature/hest_dinov3_other_cancer"
 
-    # 是否使用指定样本列表：
-    # - None: 按默认逻辑选择样本（保持原有行为）
-    # - True: 使用下面的 SPECIFIED_SAMPLE_IDS 进行处理
+    # Sample selection:
+    # - USE_SPECIFIED_SAMPLES=True: process SPECIFIED_SAMPLE_IDS (filtered by availability)
+    # - USE_ALL_SAMPLES=True: process all available samples
     USE_SPECIFIED_SAMPLES = True
     SPECIFIED_SAMPLE_IDS = [
         "INT1","INT10","INT11","INT12","INT13","INT14","INT15","INT16","INT17","INT18",
@@ -757,15 +754,14 @@ def main():
         "ZEN36","ZEN40","ZEN48","ZEN49",
         "TENX115","TENX117"
     ]
-    # 设置使用的样本范围
-    USE_ALL_SAMPLES = True  # 使用所有样本
-    MAX_SAMPLES = None  # 不限制样本数（修改：确保使用全部数据集）
+    USE_ALL_SAMPLES = True
+    MAX_SAMPLES = None
 
-    # 首先检查可用的样本
+    # Discover available samples from the ``st`` directory.
     print("=== 检查可用样本 ===")
     available_samples = []
 
-    # 检查st目录中的样本文件
+    # Scan sample files under the st directory.
     st_dir = os.path.join(hest_data_dir, "st")
     if os.path.exists(st_dir):
         for file in os.listdir(st_dir):
@@ -773,13 +769,13 @@ def main():
                 sample_id = file.replace('.h5ad', '')
                 available_samples.append(sample_id)
 
-    available_samples.sort()  # 排序以确保一致性
+    available_samples.sort()
     print(f"发现可用样本总数: {len(available_samples)}")
     print(f"样本列表: {available_samples}")
 
-    # 根据开关选择样本
+    # Choose samples based on the configuration flags above.
     if USE_SPECIFIED_SAMPLES is True:
-        # 使用手动指定的样本列表
+        # Use the manually specified list.
         specified = SPECIFIED_SAMPLE_IDS or []
         sample_ids = [sid for sid in specified if sid in available_samples]
         missing = [sid for sid in specified if sid not in available_samples]
@@ -790,21 +786,21 @@ def main():
             sample_ids = sample_ids[:MAX_SAMPLES]
             print(f"最大样本数限制: {MAX_SAMPLES}")
     elif USE_ALL_SAMPLES:
-        # 使用所有可用样本（原默认）
+        # Use all available samples.
         sample_ids = available_samples
         if MAX_SAMPLES is not None:
             sample_ids = sample_ids[:MAX_SAMPLES]
         print(f"\n选择模式: 使用所有样本")
         print(f"最大样本数限制: {MAX_SAMPLES if MAX_SAMPLES else '无限制'}")
     else:
-        # 只使用结直肠癌相关样本（TENX前缀的样本通常是结直肠癌）
+        # Example heuristic: TENX samples are often colorectal cancer.
         preferred_samples = ['TENX128', 'TENX139',
                              'TENX147', 'TENX148', 'TENX149']
         sample_ids = [
             sid for sid in preferred_samples if sid in available_samples]
 
         if not sample_ids:
-            # 如果没有找到首选样本，使用TENX开头的样本（修改：使用全部而不是前5个）
+            # Fallback: use all TENX samples if available.
             tenx_samples = [
                 sid for sid in available_samples if sid.startswith('TENX')]
             sample_ids = tenx_samples if tenx_samples else available_samples
@@ -818,8 +814,8 @@ def main():
         print("错误: 未找到可用的样本数据")
         return
 
-    # 图构建参数
-    inter_spot_k_neighbors = 6           # spot间k近邻数量
+    # Graph parameters.
+    inter_spot_k_neighbors = 6  # Inter-spot kNN neighbors.
 
     print("\n=== HEST数据集图构建（直接文件读取+深度特征）===")
     print(f"HEST数据目录: {hest_data_dir}")
@@ -832,31 +828,31 @@ def main():
         f"  - 使用深度特征: {os.path.exists(features_dir) if features_dir else False}")
     print(f"  - 特征维度: 128 (深度特征) 或自动扩展至128")
 
-    # 检查输入目录
+    # Validate input directories.
     if not os.path.exists(hest_data_dir):
         print(f"错误: HEST数据目录不存在: {hest_data_dir}")
         return
 
-    # 创建图构建器
+    # Create the graph builder.
     try:
         builder = HESTDirectReader(
             hest_data_dir=hest_data_dir,
             sample_ids=sample_ids,
-            features_dir=features_dir,  # 传递深度特征目录
+            features_dir=features_dir,  # Deep feature directory.
             inter_spot_k_neighbors=inter_spot_k_neighbors
         )
 
-        # 加载HEST数据
+        # Load HEST data.
         builder.load_sample_data()
 
         if not builder.sample_data:
             print("错误: 未能加载任何HEST数据")
             return
 
-        # 处理所有样本
+        # Process all samples.
         builder.process_all_samples()
 
-        # 构建并保存图
+        # Build and save graphs.
         metadata = builder.save_graphs(output_dir)
 
         print("\n=== 图构建完成 ===")

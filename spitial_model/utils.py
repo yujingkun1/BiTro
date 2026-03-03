@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Utility Functions for Cell2Gene
+Utility Functions for BiTro
 
 author: Jingkun Yu
 """
@@ -458,12 +458,18 @@ def count_parameters(model):
 
 def scan_cells_and_graphs(hest_data_dir, graph_dir, features_dir, sample_ids):
     """
-    读取给定样本的所有细胞，并判断每个 spot 是否有图：
-    - 若 `hest_intra_spot_graphs.pkl` 中包含 (sample_id, spot_idx) → 视为有图
-    - 否则尝试从 features_dir 的 `{sample_id}_combined_features.npz` 中构造特征（无图但有特征）
+    Scan spots for graph availability and feature fallback availability.
 
-    返回：list[dict]
-      - sample_id, spot_idx, has_graph(bool), has_features(bool), num_cells(int)
+    For each sample and each spot index:
+    - If ``hest_intra_spot_graphs.pkl`` contains (sample_id, spot_idx), we mark
+      the spot as having a graph.
+    - Otherwise, we try to infer per-spot cell counts from
+      ``{sample_id}_combined_features.npz`` under ``features_dir``.
+
+    Returns:
+        A list of dicts with keys:
+        ``sample_id``, ``spot_idx``, ``has_graph`` (bool), ``has_features`` (bool),
+        ``num_cells`` (int).
     """
     results = []
     aggregated_intra_path = os.path.join(
@@ -476,7 +482,7 @@ def scan_cells_and_graphs(hest_data_dir, graph_dir, features_dir, sample_ids):
         except Exception:
             intra = None
 
-    # 遍历 AnnData 以确定 spot 数量
+    # Iterate AnnData to determine the number of spots.
     import scanpy as sc
     for sample_id in (sample_ids if isinstance(sample_ids, list) else [sample_ids]):
         st_file = os.path.join(hest_data_dir, "st", f"{sample_id}.h5ad")
@@ -485,7 +491,7 @@ def scan_cells_and_graphs(hest_data_dir, graph_dir, features_dir, sample_ids):
         adata = sc.read_h5ad(st_file)
         n_spots = adata.n_obs
 
-        # 载入 features
+        # Load per-spot features (if available).
         per_spot_map = {}
         npz_path = os.path.join(
             features_dir, f"{sample_id}_combined_features.npz") if features_dir else None

@@ -11,22 +11,21 @@ def collate_fn_bulk_372(batch):
     patient_ids = [item['patient_id'] for item in batch]
     spot_graphs_list = [item['spot_graphs'] for item in batch]
     
-    # 确保所有expression张量大小一致
+    # Ensure all expression tensors have the same length.
     expression_list = [item['expression'] for item in batch]
     if len(expression_list) > 0:
-        # 获取目标大小（使用第一个非空张量的大小）
+        # Target length is taken from the first tensor.
         target_size = expression_list[0].shape[0] if len(expression_list[0].shape) > 0 else expression_list[0].numel()
-        # 确保所有张量大小一致
+        # Pad/truncate to the same length when needed.
         normalized_expressions = []
         for expr in expression_list:
             if expr.shape[0] != target_size:
-                # 如果大小不一致，进行填充或截断
                 if expr.shape[0] < target_size:
-                    # 填充零
+                    # Pad zeros.
                     padding = torch.zeros(target_size - expr.shape[0], dtype=expr.dtype, device=expr.device)
                     expr = torch.cat([expr, padding])
                 else:
-                    # 截断
+                    # Truncate.
                     expr = expr[:target_size]
             normalized_expressions.append(expr)
         expressions = torch.stack(normalized_expressions)
@@ -73,7 +72,7 @@ class BulkStaticGraphDataset372(Dataset):
         self.load_graph_data()
         if self.fold_config:
             self.apply_fold_filter()
-        print(f"加载{split}集: {len(self.data_keys)}个数据项")
+        print(f"Loaded split '{split}': {len(self.data_keys)} items")
         if self.selected_genes:
             self.filter_genes()
         # Prepare per-gene normalization stats (if enabled)
@@ -87,7 +86,7 @@ class BulkStaticGraphDataset372(Dataset):
                 print(f"[normalization] setup skipped or failed: {e}")
 
     def load_graph_data(self):
-        print(f"加载{self.split}集的静态图数据...")
+        print(f"Loading static graph data for split '{self.split}'...")
         intra_graphs_file = os.path.join(self.graph_data_dir, f"bulk_{self.split}_intra_patch_graphs.pkl")
         inter_graphs_file = os.path.join(self.graph_data_dir, f"bulk_{self.split}_inter_patch_graphs.pkl")
         expressions_file = os.path.join(self.graph_data_dir, f"bulk_{self.split}_expressions.pkl")
@@ -109,148 +108,149 @@ class BulkStaticGraphDataset372(Dataset):
         with open(inter_graphs_file, 'rb') as f:
             self.inter_patch_graphs = pickle.load(f)
 
-        print("加载完整细胞特征数据...")
+        print("Loading full cell feature tables...")
         if os.path.exists(all_features_file):
             with open(all_features_file, 'rb') as f:
                 self.all_cell_features = pickle.load(f)
-            print(f"✅ 加载了所有细胞的DINO特征数据")
+            print("✓ Loaded DINO features for all cells")
         else:
-            print(f"⚠️ 未找到细胞特征文件: {all_features_file}")
+            print(f"Warning: cell feature file not found: {all_features_file}")
             self.all_cell_features = {}
 
         if os.path.exists(all_positions_file):
             with open(all_positions_file, 'rb') as f:
                 self.all_cell_positions = pickle.load(f)
-            print(f"✅ 加载了所有细胞的空间坐标数据")
+            print("✓ Loaded spatial coordinates for all cells")
         else:
-            print(f"⚠️ 未找到空间坐标文件: {all_positions_file}")
+            print(f"Warning: cell position file not found: {all_positions_file}")
             self.all_cell_positions = {}
 
         if os.path.exists(cluster_labels_file):
             with open(cluster_labels_file, 'rb') as f:
                 self.cluster_labels = pickle.load(f)
-            print(f"✅ 加载了所有细胞的聚类标签数据")
+            print("✓ Loaded cluster labels for all cells")
         else:
-            print(f"⚠️ 未找到聚类标签文件: {cluster_labels_file}")
+            print(f"Warning: cluster label file not found: {cluster_labels_file}")
             self.cluster_labels = {}
 
         if os.path.exists(graph_status_file):
             with open(graph_status_file, 'rb') as f:
                 self.graph_status = pickle.load(f)
-            print(f"✅ 加载了患者图状态数据")
+            print("✓ Loaded per-patient graph status")
         else:
-            print(f"⚠️ 未找到图状态文件: {graph_status_file}")
+            print(f"Warning: graph status file not found: {graph_status_file}")
             self.graph_status = {}
 
         if os.path.exists(cell_mappings_file):
             with open(cell_mappings_file, 'rb') as f:
                 self.cell_to_graph_mappings = pickle.load(f)
-            print(f"✅ 加载了细胞到图的映射数据")
+            print("✓ Loaded cell-to-graph mappings")
         else:
-            print(f"⚠️ 未找到细胞映射文件: {cell_mappings_file}")
+            print(f"Warning: cell mapping file not found: {cell_mappings_file}")
             self.cell_to_graph_mappings = {}
 
         if os.path.exists(slide_mappings_file):
             with open(slide_mappings_file, 'rb') as f:
                 self.slide_to_patient_mapping = pickle.load(f)
-            print(f"✅ 加载了切片到患者的映射数据")
+            print("✓ Loaded slide-to-patient mapping")
             self.slide_ids = list(self.intra_patch_graphs.keys())
             self.patient_ids = list(set(self.slide_to_patient_mapping.values()))
-            print(f"  - 切片数: {len(self.slide_ids)}")
-            print(f"  - 涉及患者数: {len(self.patient_ids)}")
+            print(f"  - Slides: {len(self.slide_ids)}")
+            print(f"  - Patients: {len(self.patient_ids)}")
         else:
-            print(f"⚠️ 未找到切片映射文件，假设数据按患者组织")
+            print("Warning: slide mapping file not found; assuming data is organized by patient")
             self.slide_to_patient_mapping = {}
             self.slide_ids = []
             self.patient_ids = list(self.intra_patch_graphs.keys())
 
-        print("使用筛选后的897基因TPM数据...")
+        print("Loading TPM data (filtered gene set)...")
         if self.tpm_csv_file is None:
-            raise ValueError("tpm_csv_file参数未提供，请在创建dataset时指定TPM文件路径")
+            raise ValueError("tpm_csv_file is required; please provide the TPM CSV path when creating the dataset")
         import pandas as pd
         tpm_df = pd.read_csv(self.tpm_csv_file, index_col=0)
         
-        # 🔒 关键修复：只加载当前split对应的患者TPM数据，防止数据泄露
-        # 先确定当前split包含哪些患者ID
+        # Security: only load TPM for patients in the current split to avoid
+        # data leakage across train/test.
+        # First, determine which patient IDs belong to the current split.
         current_split_patient_ids = set()
         if self.slide_to_patient_mapping:
-            # 按切片组织：从slide_to_patient_mapping获取患者ID
+            # Slide-organized data: derive patient IDs from slide_to_patient_mapping.
             current_split_patient_ids = set(self.slide_to_patient_mapping.values())
         else:
-            # 按患者组织：直接使用patient_ids
+            # Patient-organized data: use patient_ids directly.
             current_split_patient_ids = set(self.patient_ids) if hasattr(self, 'patient_ids') else set()
         
-        print(f"🔒 数据泄露防护：当前{self.split}集包含 {len(current_split_patient_ids)} 个患者")
+        print(f"[split] Using {len(current_split_patient_ids)} patient(s) for split '{self.split}' (leakage protection)")
 
         self.expressions_data = {}
         self.patient_id_mapping = {}
         
-        # 改进的患者ID匹配：支持多种格式
+        # Robust patient ID matching: support multiple common formats.
         for full_patient_id in tpm_df.columns:
             matched_patient_id = None
             
-            # 尝试直接匹配
+            # Try direct match first.
             if full_patient_id in current_split_patient_ids:
                 matched_patient_id = full_patient_id
             else:
-                # 尝试多种格式转换后匹配
+                # Try matching after format conversions.
                 parts = full_patient_id.split('-')
-                candidate_ids = [full_patient_id]  # 原始格式
+                candidate_ids = [full_patient_id]  # original
                 
                 if len(parts) >= 4:
-                    # TCGA格式：前4部分 + '-01'
+                    # TCGA-like: first 4 parts + '-01'
                     candidate_ids.append('-'.join(parts[:4]) + '-01')
-                    # 不带样本类型
+                    # Without sample type suffix.
                     candidate_ids.append('-'.join(parts[:4]))
                 
                 if len(parts) >= 3:
-                    # 前3部分
+                    # First 3 parts.
                     candidate_ids.append('-'.join(parts[:3]))
                 
-                # 检查是否有任何候选ID在期望的患者ID集合中
+                # Check if any candidate ID exists in the expected patient set.
                 for candidate_id in candidate_ids:
                     if candidate_id in current_split_patient_ids:
                         matched_patient_id = candidate_id
                         break
             
-            # 如果匹配成功，加载数据
+            # If matched, load expression values.
             if matched_patient_id:
                 self.expressions_data[matched_patient_id] = tpm_df[full_patient_id].values.astype(np.float32)
                 self.patient_id_mapping[matched_patient_id] = full_patient_id
-        print(f"✅ 加载了 {len(self.expressions_data)} 个患者的897基因表达数据（仅当前{self.split}集）")
+        print(f"✓ Loaded expression data for {len(self.expressions_data)} patient(s) (split '{self.split}' only)")
         
-        # 检查是否成功加载了数据
+        # Sanity check: ensure data was loaded.
         if len(self.expressions_data) == 0:
-            print(f"❌ 错误：未能加载任何患者的表达数据！")
-            print(f"   当前{self.split}集期望的患者数: {len(current_split_patient_ids)}")
+            print("Error: no patient expression data was loaded")
+            print(f"  Expected patients in split '{self.split}': {len(current_split_patient_ids)}")
             if len(current_split_patient_ids) > 0:
-                print(f"   期望的患者ID示例（前5个）: {list(current_split_patient_ids)[:5]}")
-            print(f"   TPM CSV文件中的列数: {len(tpm_df.columns)}")
+                print(f"  Example expected patient IDs (first 5): {list(current_split_patient_ids)[:5]}")
+            print(f"  TPM CSV columns: {len(tpm_df.columns)}")
             if len(tpm_df.columns) > 0:
-                print(f"   TPM CSV列名示例（前5个）: {list(tpm_df.columns)[:5]}")
-                # 尝试诊断：检查格式匹配
+                print(f"  Example TPM CSV column names (first 5): {list(tpm_df.columns)[:5]}")
+                # Diagnostics: check format compatibility.
                 sample_expected = list(current_split_patient_ids)[0] if current_split_patient_ids else None
                 sample_csv = list(tpm_df.columns)[0] if len(tpm_df.columns) > 0 else None
                 if sample_expected and sample_csv:
-                    print(f"   格式诊断:")
-                    print(f"     - 期望的患者ID格式: {sample_expected}")
-                    print(f"     - CSV列名格式: {sample_csv}")
-                    # 尝试转换CSV列名看看是否匹配
+                    print("  Format diagnostics:")
+                    print(f"    - Expected patient ID: {sample_expected}")
+                    print(f"    - Example CSV column: {sample_csv}")
+                    # Try truncating CSV column format to see if it matches.
                     csv_parts = sample_csv.split('-')
                     if len(csv_parts) >= 4:
                         csv_truncated = '-'.join(csv_parts[:4]) + '-01'
-                        print(f"     - CSV列名转换后: {csv_truncated}")
-                        print(f"     - 是否匹配: {csv_truncated == sample_expected}")
+                        print(f"    - Truncated CSV column: {csv_truncated}")
+                        print(f"    - Matches expected: {csv_truncated == sample_expected}")
             raise ValueError(
-                f"未能加载任何患者的表达数据。请检查：\n"
-                f"1. TPM CSV文件路径是否正确: {self.tpm_csv_file}\n"
-                f"2. 患者ID格式是否匹配（slide_to_patient_mapping中的ID vs TPM CSV列名）\n"
-                f"3. 当前split是否包含有效的患者数据"
+                "No patient expression data could be loaded. Please check:\n"
+                f"1. TPM CSV path is correct: {self.tpm_csv_file}\n"
+                "2. Patient ID format matches (slide_to_patient_mapping IDs vs TPM CSV column names)\n"
+                f"3. Split '{self.split}' contains valid patient data"
             )
         
         sample_patient = list(self.expressions_data.keys())[0]
         sample_sum = np.sum(self.expressions_data[sample_patient])
-        print(f"验证 - 样本患者表达值总和: {sample_sum:.2f}")
+        print(f"Sanity check - sample patient expression sum: {sample_sum:.2f}")
 
         with open(metadata_file, 'r') as f:
             self.metadata = json.load(f)
@@ -259,13 +259,13 @@ class BulkStaticGraphDataset372(Dataset):
             if self.max_samples is not None:
                 self.slide_ids = self.slide_ids[:self.max_samples]
             self.data_keys = self.slide_ids
-            print(f"✅ 数据按切片组织: {len(self.slide_ids)} 个切片")
+            print(f"✓ Data organized by slide: {len(self.slide_ids)} slides")
         else:
             self.patient_ids = list(self.expressions_data.keys())
             if self.max_samples is not None:
                 self.patient_ids = self.patient_ids[:self.max_samples]
             self.data_keys = self.patient_ids
-            print(f"✅ 数据按患者组织: {len(self.patient_ids)} 个患者")
+            print(f"✓ Data organized by patient: {len(self.patient_ids)} patients")
 
         items_with_graphs = 0
         items_without_graphs = 0
@@ -275,25 +275,25 @@ class BulkStaticGraphDataset372(Dataset):
                 items_with_graphs += 1
             else:
                 items_without_graphs += 1
-        print(f"数据统计:")
+        print("Dataset stats:")
         if self.slide_to_patient_mapping:
-            print(f"  - 总切片数: {len(self.data_keys)}")
-            print(f"  - 有图数据切片: {items_with_graphs}")
-            print(f"  - 无图数据切片: {items_without_graphs} (仅使用原始DINO特征)")
+            print(f"  - Total slides: {len(self.data_keys)}")
+            print(f"  - Slides with graphs: {items_with_graphs}")
+            print(f"  - Slides without graphs: {items_without_graphs} (raw DINO features only)")
         else:
-            print(f"  - 总患者数: {len(self.data_keys)}")
-            print(f"  - 有图数据患者: {items_with_graphs}")
-            print(f"  - 无图数据患者: {items_without_graphs} (仅使用原始DINO特征)")
+            print(f"  - Total patients: {len(self.data_keys)}")
+            print(f"  - Patients with graphs: {items_with_graphs}")
+            print(f"  - Patients without graphs: {items_without_graphs} (raw DINO features only)")
 
         self.feature_dim = self.metadata.get('feature_dim', 128) if isinstance(self.metadata, dict) else 128
         self.original_num_genes = len(list(self.expressions_data.values())[0]) if self.expressions_data else 18080
 
     def apply_fold_filter(self):
-        """根据fold_config过滤数据（如果提供了fold_config）"""
+        """Optionally filter data according to fold_config (if provided)."""
         if not self.fold_config:
             return
-        # 如果提供了fold_config，可以在这里实现交叉验证的数据过滤逻辑
-        # 目前暂时跳过，因为主要的数据划分已经通过split参数完成
+        # If fold_config is provided, cross-validation filtering can be implemented here.
+        # Currently skipped because split-based partitioning is already applied.
         pass
 
     def filter_genes(self):
@@ -308,12 +308,12 @@ class BulkStaticGraphDataset372(Dataset):
                 filtered_expressions[patient_id] = np.zeros(target_gene_count)
         self.expressions_data = filtered_expressions
         self.num_genes = target_gene_count
-        print(f"基因过滤完成，最终基因数量: {self.num_genes}")
+        print(f"Gene filtering complete. Final gene count: {self.num_genes}")
         if filtered_expressions:
             sample_patient = list(filtered_expressions.keys())[0]
             sample_data = filtered_expressions[sample_patient]
             sample_total = np.sum(sample_data)
-            print(f"TPM数据验证：样本患者 {sample_patient} 表达值总和: {sample_total:.2f}")
+            print(f"TPM sanity check: patient {sample_patient} expression sum: {sample_total:.2f}")
 
     def setup_gene_normalization(self):
         """

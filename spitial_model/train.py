@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Main Training Script for Cell2Gene HEST Spatial Gene Expression Prediction
+Main training script for BiTro HEST spatial gene expression prediction.
 
 author: Jingkun Yu
 """
 # fmt: off
 # pylint: disable=wrong-import-order
-# add cluster
 import os
 import sys
 import json
@@ -48,7 +47,7 @@ def main():
     """Main training workflow - supports 10-fold and leave-one-out cross validation"""
     
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Train Cell2Gene HEST Spatial Model')
+    parser = argparse.ArgumentParser(description='Train BiTro HEST Spatial Model')
     parser.add_argument('--output_dir', type=str, 
                        default=os.environ.get('OUTPUT_DIR', './log_normalized'),
                        help='Output directory for logs, results, and checkpoints (default: ./log_normalized or from OUTPUT_DIR env var)')
@@ -69,10 +68,10 @@ def main():
     batch_size = 128
     num_epochs = 60
     learning_rate = 1e-5
-    weight_decay = 1e-5   # 恢复正常weight_decay
+    weight_decay = 1e-5   # Use a standard, non-zero weight decay.
     feature_dim = 128
 
-    # 迁移学习配置
+    # Transfer learning configuration.
     use_transfer_learning = os.environ.get(
         "USE_TRANSFER_LEARNING", "false").lower() == "true"
     bulk_model_path = "/data/yujk/hovernet2feature/best_BRCA_lora_model_cluster.pt"

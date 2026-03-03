@@ -272,7 +272,7 @@ class OptimizedTransformerPredictor(nn.Module):
         all_cells = torch.cat(all_cell_features, dim=0)
         all_positions = torch.cat(all_cell_positions, dim=0)
         total_cells = all_cells.shape[0]
-        print(f"    批量处理：{len(graph_list)}个图 → {total_cells}个细胞的大序列")
+        print(f"    Batch processing: {len(graph_list)} graphs -> {total_cells} cells (single long sequence)")
 
         all_projected = self.feature_projection(all_cells)
 

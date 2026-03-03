@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Dataset Module for Cell2Gene HEST Spatial Gene Expression Prediction
+Dataset Module for BiTro HEST Spatial Gene Expression Prediction
 
 author: Jingkun Yu
 """
@@ -26,7 +26,7 @@ except ImportError:
 
 class HESTSpatialDataset(Dataset):
     """
-    HEST Spatial Transcriptomics Dataset for Cell2Gene prediction
+    HEST Spatial Transcriptomics Dataset for BiTro prediction.
     """
 
     def __init__(self,
@@ -64,20 +64,20 @@ class HESTSpatialDataset(Dataset):
         print(f"Sample count: {len(self.sample_ids)}")
         print(f"Sample list: {self.sample_ids}")
 
-        # 设置随机种子
+        # Set random seeds for reproducibility.
         np.random.seed(seed)
         torch.manual_seed(seed)
 
-        # 加载基因映射
+        # Load gene mapping / gene list.
         self.load_gene_mapping()
 
-        # 加载HEST数据
+        # Load HEST spot-level expression data.
         self.load_hest_data()
 
-        # 加载细胞特征数据（用于无图时直接使用特征）
+        # Load per-cell features used as a fallback when graphs are missing.
         self.load_feature_data()
 
-        # 加载图数据
+        # Load graph data (if available).
         self.load_graph_data()
 
         # Setup per-gene normalization if required
@@ -302,14 +302,20 @@ class HESTSpatialDataset(Dataset):
     def load_feature_data(self):
         """Load per-spot cell features/positions from combined_features.npz per sample.
 
-        约定的数据格式（简化后）：
-        - 每个样本一个NPZ：{sample_id}_combined_features.npz
-        - 支持两种组织方式（二选一）：
-          1) per_spot: dict[int spot_idx -> { 'x': ndarray[num_cells,D], 'pos': ndarray[num_cells,2] }]
-          2) 扁平：features(ndarray[N,D]), positions(ndarray[N,2])，并配合 spot_ptr(M+1) 或 spot_index(N) 来分组至spot
-        
-        目标：当某个spot没有图时，使用该spot的细胞特征与坐标构建“无边图”（edge_index为空），
-        在模型中自动跳过GNN，直接进入Transformer。
+        Expected NPZ layout (simplified):
+        - One NPZ per sample: ``{sample_id}_combined_features.npz``
+        - Two supported organizations (either one):
+          1) ``per_spot``:
+             ``dict[int spot_idx -> {'x': (num_cells, D), 'pos': (num_cells, 2)}]``
+          2) Flat arrays:
+             ``features (N, D)``, ``positions (N, 2)``, optionally with
+             ``spot_ptr (M+1)`` or ``spot_index (N)`` to group cells into spots.
+
+        Goal:
+            If a spot graph is missing, build a graph with no edges
+            (empty ``edge_index``) from the spot's cell features/positions.
+            The model can then skip the GNN and proceed directly to the
+            Transformer.
         """
         import numpy as np
         self.spot_features_map = {}
@@ -328,7 +334,7 @@ class HESTSpatialDataset(Dataset):
                 npz = np.load(npz_path, allow_pickle=True)
                 keys = set(npz.keys())
 
-                # 1) per_spot 组织
+                # 1) Per-spot layout.
                 if 'per_spot' in keys:
                     per_spot = None
                     try:
@@ -347,7 +353,7 @@ class HESTSpatialDataset(Dataset):
                         print(f"  - {sample_id}: loaded per_spot entries: {count}")
                         continue
 
-                # 2) 扁平组织：features + positions + spot_ptr 或 spot_index
+                # 2) Flat layout: features + positions (+ spot_ptr or spot_index).
                 if 'features' in keys and 'positions' in keys:
                     feats = np.asarray(npz['features'], dtype=np.float32)
                     poss = np.asarray(npz['positions'], dtype=np.float32)
@@ -458,7 +464,8 @@ class HESTSpatialDataset(Dataset):
                 "PyTorch Geometric is required but not available.")
 
         if graph_data is None:
-            # 优先使用特征构造“无边图”，否则退化为旧的占位图
+            # Prefer building an edgeless graph from features; otherwise fallback
+            # to a minimal placeholder graph.
             built = False
             feat_key = (spot_data['sample_id'], spot_data['spot_idx'])
             feat_entry = getattr(self, 'spot_features_map', {}).get(feat_key)
@@ -473,7 +480,7 @@ class HESTSpatialDataset(Dataset):
                     )
                     built = True
             if not built:
-                # 保底：单节点占位，避免训练崩溃
+                # Last resort: a single-node placeholder to avoid crashing.
                 spot_graph = Data(
                     x=torch.zeros(1, self.feature_dim, dtype=torch.float32),
                     edge_index=torch.empty((2, 0), dtype=torch.long)

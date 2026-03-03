@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Graph Neural Network Models for Cell2Gene
+Graph neural network modules for BiTro.
 
 author: Jingkun Yu
 """
@@ -17,7 +17,7 @@ try:
     print(f"✓ PyTorch Geometric version: {torch_geometric.__version__}")
 except ImportError as e:
     GNN_AVAILABLE = False
-    print(f"警告: PyTorch Geometric不可用: {e}")
+    print(f"Warning: PyTorch Geometric is not available: {e}")
 
 
 class StaticGraphGNN(nn.Module):

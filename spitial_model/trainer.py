@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Training Module for Cell2Gene
+Training utilities for BiTro spatial models.
 
 author: Jingkun Yu
 """
@@ -18,7 +18,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
                            num_epochs=100, device="cuda", patience=10, min_delta=1e-6, fold_idx=None,
                            cluster_loss_weight: float = 0, checkpoint_path: str = "best_hest_graph_model.pt"):
     """
-    Training function for HEST graph model with early stopping
+    Train an HEST graph model with early stopping.
     """
     model.to(device)
     criterion = nn.MSELoss()
@@ -30,7 +30,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
     # Early stopping variables
     early_stopping_counter = 0
     best_epoch = 0
-    # 最小启用早停的epoch阈值（每个fold在20个epoch之后才启动早停）
+    # Only enable early stopping after a warm-up period.
     min_early_stop_epoch = 12
 
     train_losses = []
@@ -67,7 +67,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
             skip_batch = False
 
             with autocast('cuda'):
-                # Forward pass（返回节点嵌入用于聚类loss）
+                # Forward pass (optionally returns node embeddings for cluster loss).
                 out = model(spot_graphs, return_node_embeddings=True)
                 if isinstance(out, tuple) and len(out) == 3:
                     predictions, node_embeddings_list, processed_indices = out
@@ -75,7 +75,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
                     predictions = out
                     node_embeddings_list, processed_indices = [], list(range(len(spot_graphs)))
 
-                # 添加调试信息
+                # Optional debug info.
                 if batch_idx == 0 and epoch == 0:
                     print(f"Debug - Batch {batch_idx}:")
                     print(
@@ -85,7 +85,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
                     print(
                         f"  predictions.requires_grad: {predictions.requires_grad}")
 
-                # 对齐targets与有效预测（如有跳过的图）
+                # Align targets with processed graphs (some graphs may be skipped).
                 try:
                     if predictions.shape[0] != spot_expressions.shape[0]:
                         if processed_indices:
@@ -93,12 +93,13 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
                 except Exception:
                     pass
 
-                # Calculate loss in log space: pure MSE + 可选聚类loss
+                # Loss: MSE + optional cluster regularization.
                 recon_loss = criterion(predictions, spot_expressions)
 
                 cluster_loss = torch.zeros((), device=predictions.device)
                 if cluster_loss_weight and cluster_loss_weight > 0 and node_embeddings_list:
-                    # 针对每个有效图，基于Transformer节点嵌入计算类内聚合损失
+                    # For each valid graph, compute an intra-cluster compactness loss
+                    # based on node embeddings.
                     for emb, gi in zip(node_embeddings_list, processed_indices):
                         try:
                             g = spot_graphs[gi]
@@ -108,10 +109,10 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
                             labels = labels.to(emb.device)
                             if labels.dim() != 1 or labels.numel() != emb.size(0):
                                 continue
-                            # 对每个类别计算到类中心的平均距离
+                            # For each cluster label, compute mean distance to centroid.
                             unique = torch.unique(labels)
                             for c in unique:
-                                # 忽略负标签（如占位）
+                                # Ignore negative labels (e.g., placeholders).
                                 if c.item() < 0:
                                     continue
                                 idx = (labels == c).nonzero(as_tuple=False).squeeze(1)
@@ -138,7 +139,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
             if not skip_batch:
                 # Gradient processing and optimizer update
                 scaler.unscale_(optimizer)
-                # 放宽梯度裁剪，允许更大的梯度更新
+                # Use a looser gradient clipping threshold.
                 torch.nn.utils.clip_grad_norm_(
                     model.parameters(), max_norm=5.0)
                 scaler.step(optimizer)
@@ -191,7 +192,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
         print(f"  Overall Pearson: {epoch_overall_corr:.6f}")
         print(f"  LR: {current_lr:.2e}")
 
-        # 添加梯度范数监控
+        # Gradient norm monitoring.
         total_grad_norm = 0.0
         param_count = 0
         for param in model.parameters():
@@ -239,7 +240,7 @@ def setup_optimizer_and_scheduler(model, learning_rate=1e-3, weight_decay=1e-5, 
     """
     Setup optimizer and learning rate scheduler
     """
-    # 大幅提高学习率到1e-3，这是更合理的范围
+    # Default LR is set to 1e-3 as a reasonable baseline.
     optimizer = optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(

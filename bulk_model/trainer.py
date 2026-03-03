@@ -38,23 +38,23 @@ def load_spatial_pretrained_weights(
     device = torch.device(device)
 
     if not spatial_checkpoint_path:
-        print("⚠ 未提供 spatial 模型路径，跳过迁移学习初始化。")
+        print("Warning: spatial checkpoint path not provided; skipping transfer initialization")
         return model
 
     if not os.path.exists(spatial_checkpoint_path):
-        print(f"⚠ Spatial checkpoint 未找到: {spatial_checkpoint_path}")
+        print(f"Warning: spatial checkpoint not found: {spatial_checkpoint_path}")
         return model
 
-    print("\n=== 从 Spatial 预训练模型初始化 Bulk 模型权重 ===")
+    print("\n=== Initializing bulk weights from a pretrained spatial checkpoint ===")
     print(f"Spatial checkpoint: {spatial_checkpoint_path}")
 
     try:
         spatial_state = torch.load(spatial_checkpoint_path, map_location=device)
-        # 兼容直接保存 state_dict 或包含 'state_dict' 的情况
+        # Support both raw state_dict and {"state_dict": ...} formats.
         if isinstance(spatial_state, dict) and "state_dict" in spatial_state:
             spatial_state = spatial_state["state_dict"]
         if not isinstance(spatial_state, dict):
-            raise ValueError("Spatial checkpoint 不包含有效的 state_dict 字典")
+            raise ValueError("Spatial checkpoint does not contain a valid state_dict")
 
         model_state = model.state_dict()
 
@@ -63,7 +63,7 @@ def load_spatial_pretrained_weights(
         mismatched_keys: list[tuple[str, torch.Size, torch.Size]] = []
 
         for key, value in spatial_state.items():
-            # 跳过明显的空间特异参数
+            # Skip spatial-specific parameters.
             if any(
                 s in key
                 for s in [
@@ -83,59 +83,59 @@ def load_spatial_pretrained_weights(
                 else:
                     mismatched_keys.append((key, model_state[key].shape, value.shape))
             else:
-                # 其他在 bulk 模型中不存在的 key 也跳过
+                # Skip keys that do not exist in the bulk model.
                 skipped_keys.append(key)
 
         model.load_state_dict(model_state, strict=False)
 
-        print(f"✓ 成功从 spatial 模型加载 {len(loaded_keys)} 层参数到 bulk 模型")
+        print(f"✓ Loaded {len(loaded_keys)} compatible layers from the spatial checkpoint into the bulk model")
         if loaded_keys:
-            print(f"  示例: {', '.join(loaded_keys[:5])}")
+            print(f"  Examples: {', '.join(loaded_keys[:5])}")
 
         if mismatched_keys:
-            print(f"⚠ 因形状不匹配跳过 {len(mismatched_keys)} 层（例如输出 head 基因数不同）:")
+            print(f"⚠ Skipped {len(mismatched_keys)} layers due to shape mismatch (e.g., different gene counts in the output head):")
             for k, ms, ss in mismatched_keys[:5]:
                 print(f"  {k}: bulk {ms} vs spatial {ss}")
             if len(mismatched_keys) > 5:
-                print(f"  ... 以及另外 {len(mismatched_keys) - 5} 层")
+                print(f"  ... and {len(mismatched_keys) - 5} more")
 
         if skipped_keys:
-            print(f"ℹ 跳过 {len(skipped_keys)} 个 spatial 特有或 bulk 中不存在的参数（如 gene_queries/x_embed 等）")
+            print(f"ℹ Skipped {len(skipped_keys)} spatial-only or bulk-missing parameters (e.g., gene_queries/x_embed)")
 
         if freeze_backbone:
-            print("\n=== 冻结 Bulk 模型 Backbone（GNN + feature_projection + transformer）===")
+            print("\n=== Freezing bulk backbone (GNN + feature_projection + transformer) ===")
             frozen_params = 0
             trainable_params = 0
 
-            # 冻结 GNN
+            # Freeze GNN.
             if hasattr(model, "gnn"):
                 for _, p in model.gnn.named_parameters():
                     p.requires_grad = False
                     frozen_params += p.numel()
 
-            # 冻结特征投影
+            # Freeze feature projection.
             if hasattr(model, "feature_projection"):
                 for _, p in model.feature_projection.named_parameters():
                     p.requires_grad = False
                     frozen_params += p.numel()
 
-            # 冻结 transformer
+            # Freeze Transformer.
             if hasattr(model, "transformer"):
                 for _, p in model.transformer.named_parameters():
                     p.requires_grad = False
                     frozen_params += p.numel()
 
-            # 统计仍然可训练的参数（例如 output_projection 的最后几层）
+            # Count remaining trainable parameters (e.g., output head).
             for name, p in model.named_parameters():
                 if p.requires_grad:
                     trainable_params += p.numel()
 
-            print(f"✓ Backbone 冻结参数量: {frozen_params:,}")
-            print(f"✓ 仍可训练参数量: {trainable_params:,}")
+            print(f"✓ Frozen backbone parameters: {frozen_params:,}")
+            print(f"✓ Remaining trainable parameters: {trainable_params:,}")
 
     except Exception as e:  # pylint: disable=broad-except
-        print(f"❌ 从 spatial checkpoint 加载权重失败: {e}")
-        print("将使用随机初始化的 bulk 模型继续训练。")
+        print(f"Error: failed to load weights from spatial checkpoint: {e}")
+        print("Continuing training with randomly initialized bulk model weights.")
 
     return model
 
@@ -156,8 +156,8 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
     train_losses = []
     test_losses = []
 
-    print("=== 开始优化训练（批量处理多图）===")
-    print(f"图批量大小: {model.graph_batch_size}")
+    print("=== Starting optimized training (multi-graph batching) ===")
+    print(f"Graph batch size: {model.graph_batch_size}")
 
     for epoch in range(num_epochs):
         model.train()
@@ -166,7 +166,7 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
         batch_skip_count = 0
         patient_skip_count = 0
 
-        print(f"\n=== Epoch {epoch+1} 开始训练 ===")
+        print(f"\n=== Epoch {epoch+1} training ===")
 
         for batch_idx, batch in enumerate(train_loader):
             batch_start_time = time.time() if enable_profiling else None
@@ -178,7 +178,7 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
 
             log_this_batch = (batch_idx % log_every == 0) or debug
             if log_this_batch:
-                print(f"\nBatch {batch_idx}: 开始处理 {len(spot_graphs_list)} 个患者")
+                print(f"\nBatch {batch_idx}: processing {len(spot_graphs_list)} patients")
 
             optimizer.zero_grad()
 
@@ -193,11 +193,11 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
                 has_graphs = batch['has_graphs_list'][i]
 
                 if log_this_batch:
-                    print(f"  患者 {i+1}: 细胞特征形状={all_cell_features.shape}, 位置形状={all_cell_positions.shape}, 有图={has_graphs}, 图数量={len(spot_graphs) if spot_graphs else 0}")
+                    print(f"  Patient {i+1}: cell_features={all_cell_features.shape}, positions={all_cell_positions.shape}, has_graphs={has_graphs}, n_graphs={len(spot_graphs) if spot_graphs else 0}")
 
                 if all_cell_features.shape[0] == 0:
                     if log_this_batch:
-                        print(f"    ⚠️ 跳过患者 {i+1}：没有细胞特征数据")
+                        print(f"    Warning: skipping patient {i+1} (no cell features)")
                     patient_skip_count += 1
                     continue
 
@@ -220,11 +220,11 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
 
                         if total_cells <= max_cells_threshold:
                             if log_this_batch:
-                                print(f"    有图处理：{len(spot_graphs)}个图 → {total_cells}个细胞 (图增强)")
+                                print(f"    Graph mode: {len(spot_graphs)} graphs -> {total_cells} cells (graph-enhanced)")
                             cell_predictions_list = model(spot_graphs)
                         else:
                             if log_this_batch:
-                                print(f"    超大有图患者：{len(spot_graphs)}个图 → {total_cells}个细胞 (梯度累积分批)")
+                                print(f"    Large graph sample: {len(spot_graphs)} graphs -> {total_cells} cells (chunked to fit memory)")
                             target_cells_per_batch = 10000
                             batch_size_adaptive = max(32, len(spot_graphs) * target_cells_per_batch // total_cells)
                             all_cell_predictions_list = []
@@ -233,7 +233,7 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
                                 batch_graphs = spot_graphs[batch_start:batch_end]
                                 batch_cells = sum([g.x.shape[0] for g in batch_graphs if hasattr(g, 'x')])
                                 if log_this_batch:
-                                    print(f"      分批{batch_start//batch_size_adaptive + 1}: {len(batch_graphs)}个图 → {batch_cells}个细胞")
+                                    print(f"      Chunk {batch_start//batch_size_adaptive + 1}: {len(batch_graphs)} graphs -> {batch_cells} cells")
                                 current_batch_predictions = model(batch_graphs)
                                 all_cell_predictions_list.extend(current_batch_predictions)
                                 torch.cuda.empty_cache()
@@ -241,7 +241,7 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
                             cell_predictions_list = all_cell_predictions_list
                     else:
                         if log_this_batch:
-                            print(f"    无图处理：{all_cell_features.shape[0]}个细胞 (原始DINO特征)")
+                            print(f"    No-graph mode: {all_cell_features.shape[0]} cells (raw DINO features)")
                         cell_predictions = model.forward_raw_features(all_cell_features, all_cell_positions)
                         cell_predictions_list = [cell_predictions]
 
@@ -254,11 +254,11 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
                             if stacked.shape[0] > 0:
                                 aggregated_prediction = stacked.sum(dim=0, keepdim=True)  # [1, G]
                                 if log_this_batch:
-                                    print(f"    患者 {i+1} 基因级聚合：图数={stacked.shape[0]}, 聚合结果形状={aggregated_prediction.shape}")
+                                    print(f"    Patient {i+1} gene-level aggregation: n_graphs={stacked.shape[0]}, aggregated_shape={aggregated_prediction.shape}")
                             else:
                                 aggregated_prediction = torch.zeros(1, expressions.shape[1], device=device)
                                 if log_this_batch:
-                                    print(f"    患者 {i+1} 预测聚合：没有有效图，使用零预测")
+                                    print(f"    Patient {i+1} aggregation: no valid graphs; using zero prediction")
                         else:
                             # node-level outputs: concatenate per-node predictions and sum across nodes
                             all_cell_predictions = torch.cat([pred for pred in cell_predictions_list if pred.shape[0] > 0], dim=0)
@@ -288,37 +288,37 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
                             if all_cell_predictions.shape[0] > 0:
                                 aggregated_prediction = all_cell_predictions.sum(dim=0, keepdim=True)
                                 if log_this_batch:
-                                    print(f"    患者 {i+1} 预测聚合：细胞数={all_cell_predictions.shape[0]}, 聚合结果形状={aggregated_prediction.shape}, cluster_loss_sample={cluster_loss_sample:.6f}")
+                                    print(f"    Patient {i+1} aggregation: n_cells={all_cell_predictions.shape[0]}, aggregated_shape={aggregated_prediction.shape}, cluster_loss_sample={cluster_loss_sample:.6f}")
                             else:
                                 aggregated_prediction = torch.zeros(1, expressions.shape[1], device=device)
                                 if log_this_batch:
-                                    print(f"    患者 {i+1} 预测聚合：没有有效细胞，使用零预测")
+                                    print(f"    Patient {i+1} aggregation: no valid cells; using zero prediction")
                             # accumulate cluster loss for batch
                             batch_cluster_loss += cluster_loss_sample
                     else:
                         aggregated_prediction = torch.zeros(1, expressions.shape[1], device=device)
                         if log_this_batch:
-                            print(f"    患者 {i+1} 预测聚合：没有预测结果，使用零预测")
+                            print(f"    Patient {i+1} aggregation: no predictions returned; using zero prediction")
 
                 batch_predictions.append(aggregated_prediction)
 
             if not batch_predictions:
                 if log_this_batch:
-                    print(f"    ⚠️ Batch {batch_idx}: 所有患者都被跳过，没有有效预测")
+                    print(f"    Warning: Batch {batch_idx}: all patients skipped; no valid predictions")
                 batch_skip_count += 1
                 continue
 
             if len(batch_predictions) != len(spot_graphs_list):
                 if log_this_batch:
-                    print(f"    ⚠️ Batch {batch_idx}: {len(spot_graphs_list)}个患者中只有{len(batch_predictions)}个有效")
+                    print(f"    Warning: Batch {batch_idx}: only {len(batch_predictions)}/{len(spot_graphs_list)} patients produced valid predictions")
 
             predictions = torch.cat(batch_predictions, dim=0)
             if log_this_batch:
-                print(f"  Batch {batch_idx} 合并预测：形状={predictions.shape}")
+                print(f"  Batch {batch_idx} merged predictions: shape={predictions.shape}")
 
             if predictions.shape[0] != expressions.shape[0]:
                 if log_this_batch:
-                    print(f"    ⚠️ 预测和真实值数量不匹配: {predictions.shape[0]} vs {expressions.shape[0]}")
+                    print(f"    Warning: prediction/target batch size mismatch: {predictions.shape[0]} vs {expressions.shape[0]}")
                 expressions = expressions[:predictions.shape[0]]
 
             with autocast('cuda'):
@@ -326,7 +326,7 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
                     pred_sum = predictions.sum().item()
                     if pred_sum <= 1e-10 or not torch.isfinite(predictions).all():
                         if log_this_batch:
-                            print(f"    ❌ 警告：预测异常，跳过这个batch")
+                            print("    Error: invalid predictions (sum too small or non-finite); skipping batch")
                         batch_skip_count += 1
                         continue
 
@@ -337,7 +337,7 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
 
                     if torch.isnan(result).any() or torch.isinf(result).any():
                         if log_this_batch:
-                            print(f"    ❌ 警告：归一化结果包含NaN或Inf！跳过")
+                            print("    Error: normalized result contains NaN/Inf; skipping batch")
                         batch_skip_count += 1
                         continue
 
@@ -347,34 +347,34 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
                         # batch_cluster_loss already summed across patients
                         loss = loss + cluster_loss_weight * batch_cluster_loss
                 if log_this_batch:
-                    print(f"  计算损失：{loss.item():.6f}")
+                    print(f"  Loss: {loss.item():.6f}")
                 if torch.isnan(loss) or torch.isinf(loss):
                     if log_this_batch:
-                        print(f"    ❌ 警告：损失为NaN或Inf，跳过这个batch")
+                        print("    Error: loss is NaN/Inf; skipping batch")
                     batch_skip_count += 1
                     continue
 
                 backward_start_time = time.time() if enable_profiling else None
                 if log_this_batch:
-                    print(f"  开始反向传播...")
+                    print("  Backward pass...")
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
                 scaler.step(optimizer)
                 scaler.update()
                 if log_this_batch:
-                    print(f"  反向传播完成")
+                    print("  Backward pass done")
                 if enable_profiling:
                     backward_time = time.time() - backward_start_time if backward_start_time else 0.0
                     forward_time = (backward_start_time - forward_start_time) if forward_start_time else 0.0
                     total_batch_time = time.time() - batch_start_time if batch_start_time else 0.0
                     if log_this_batch:
-                        print(f"  性能统计: 总时间={total_batch_time:.3f}s, 数据加载={data_loading_time:.3f}s, 前向={forward_time:.3f}s, 反向={backward_time:.3f}s")
+                        print(f"  Profiling: total={total_batch_time:.3f}s, data={data_loading_time:.3f}s, forward={forward_time:.3f}s, backward={backward_time:.3f}s")
 
                 running_loss += loss.item()
                 num_batches += 1
 
-                # 🔧 关键修复：监控完成后再清理大tensor
+                # Important: only delete large tensors after monitoring/logging.
                 del predictions, result, loss
                 del batch_predictions
                 del expressions, spot_graphs_list
@@ -383,20 +383,20 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
                         torch.cuda.empty_cache()
 
         if num_batches == 0:
-            print(f"Epoch {epoch+1}: 所有batch都被跳过")
-            print(f"  跳过的batch数: {batch_skip_count}")
-            print(f"  跳过的患者数: {patient_skip_count}")
+            print(f"Epoch {epoch+1}: all batches were skipped")
+            print(f"  Skipped batches: {batch_skip_count}")
+            print(f"  Skipped patients: {patient_skip_count}")
             continue
 
         epoch_loss = running_loss / num_batches
         train_losses.append(epoch_loss)
 
-        print(f"\nEpoch {epoch+1} 训练统计:")
-        print(f"  总batch数: {batch_idx + 1}")
-        print(f"  成功训练的batch数: {num_batches}")
-        print(f"  跳过的batch数: {batch_skip_count}")
-        print(f"  跳过的患者数: {patient_skip_count}")
-        print(f"  平均损失: {epoch_loss:.6f}")
+        print(f"\nEpoch {epoch+1} training summary:")
+        print(f"  Total batches: {batch_idx + 1}")
+        print(f"  Trained batches: {num_batches}")
+        print(f"  Skipped batches: {batch_skip_count}")
+        print(f"  Skipped patients: {patient_skip_count}")
+        print(f"  Mean loss: {epoch_loss:.6f}")
 
         model.eval()
         test_loss = 0.0
@@ -499,17 +499,17 @@ def train_optimized_model(model, train_loader, test_loader, optimizer, scheduler
             best_epoch = epoch + 1
             early_stopping_counter = 0
             torch.save(model.state_dict(), "best_PRAD_lora_model_cluster_norm_attention.pt")
-            print(f"  *** 保存最佳模型 ***")
+            print("  *** Saved best model ***")
         else:
             early_stopping_counter += 1
             if early_stopping_counter >= patience:
-                print(f"早停触发！最佳测试损失: {best_test_loss:.6f} (Epoch {best_epoch})")
+                print(f"Early stopping triggered. Best test loss: {best_test_loss:.6f} (epoch {best_epoch})")
                 break
 
         if epoch_loss < best_loss:
             best_loss = epoch_loss
 
-    print(f"\n训练完成! 最佳测试损失: {best_test_loss:.6f}")
+    print(f"\nTraining complete. Best test loss: {best_test_loss:.6f}")
 
     plt.figure(figsize=(12, 6))
     plt.plot(range(1, len(train_losses) + 1), train_losses, label='Train Loss', color='blue')

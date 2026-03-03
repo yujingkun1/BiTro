@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cell2Gene: Spatial Gene Expression Prediction from Histology Images
+BiTro: Spatial Gene Expression Prediction from Histology Images
 
 A modular implementation for predicting spatial gene expression from 
 histology images using Graph Neural Networks and Transformers.

@@ -1,4 +1,4 @@
-"""spitial_model package."""
+"""spitial_model package for BiTro."""
 
 # Setup path directly without circular import
 import os
@@ -6,7 +6,7 @@ import sys
 
 _current_file_dir = os.path.dirname(
     os.path.abspath(__file__))  # spitial_model directory
-_cell2gene_dir = os.path.dirname(_current_file_dir)  # Cell2Gene directory
+_cell2gene_dir = os.path.dirname(_current_file_dir)  # BiTro package directory
 
 if _cell2gene_dir not in sys.path:
     sys.path.insert(0, _cell2gene_dir)

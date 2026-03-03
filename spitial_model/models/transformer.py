@@ -156,33 +156,33 @@ class StaticGraphTransformerPredictor(nn.Module):
     def generate_spatial_pos_encoding(self, positions, embed_dim):
         batch_size = positions.shape[0]
         
-        # 将连续坐标归一化到[0, n_pos-1]范围
-        # 使用min-max归一化避免坐标超出范围
+        # Normalize continuous coordinates into the index range [0, n_pos - 1]
+        # using min-max scaling to avoid out-of-range indices.
         x_coords = positions[:, 0]
         y_coords = positions[:, 1]
         
-        # 计算坐标的范围并归一化
+        # Compute coordinate ranges and normalize.
         if x_coords.numel() > 0:
             x_min, x_max = x_coords.min(), x_coords.max()
             y_min, y_max = y_coords.min(), y_coords.max()
             
-            # 防止除零错误
+            # Avoid division by zero.
             x_range = x_max - x_min if x_max > x_min else 1.0
             y_range = y_max - y_min if y_max > y_min else 1.0
             
-            # 归一化到[0, n_pos-1]
+            # Map into [0, n_pos - 1].
             x_normalized = ((x_coords - x_min) / x_range * (self.n_pos - 1)).long()
             y_normalized = ((y_coords - y_min) / y_range * (self.n_pos - 1)).long()
             
-            # 确保索引在有效范围内
+            # Clamp indices to valid bounds.
             x_indices = torch.clamp(x_normalized, 0, self.n_pos - 1)
             y_indices = torch.clamp(y_normalized, 0, self.n_pos - 1)
         else:
-            # 如果没有坐标数据，使用零索引
+            # No coordinate data: use zeros.
             x_indices = torch.zeros(batch_size, dtype=torch.long, device=positions.device)
             y_indices = torch.zeros(batch_size, dtype=torch.long, device=positions.device)
         
-        # 获取x和y的嵌入
+        # Lookup x/y embeddings.
         x_emb = self.x_embed(x_indices)  # [batch_size, embed_dim]
         y_emb = self.y_embed(y_indices)  # [batch_size, embed_dim]
         
@@ -195,7 +195,7 @@ class StaticGraphTransformerPredictor(nn.Module):
         if not isinstance(batch_graphs, (list, tuple)) or len(batch_graphs) == 0:
             return torch.zeros(0, self.output_projection[-2].out_features, device=device)
         
-        # 第一步：收集所有有效图并处理GNN部分（保持原样，逐图处理）
+        # Step 1: collect valid graphs and run the GNN part (per-graph).
         valid_graphs_data = []
         valid_indices = []
         for idx, g in enumerate(batch_graphs):
@@ -209,16 +209,16 @@ class StaticGraphTransformerPredictor(nn.Module):
                 edge_index = edge_index.to(device)
             gx = gx.to(device)
 
-            # GNN 编码（单图，保持原样）
+            # GNN encoding (per graph).
             if self.use_gnn and edge_index is not None and edge_index.numel() > 0:
                 node_features = self.gnn(gx, edge_index)
             else:
                 node_features = gx
 
-            # 线性投影到 Transformer 维度
+            # Linear projection to Transformer embedding dimension.
             node_features = self.feature_projection(node_features)  # [S, E]
 
-            # 空间位置编码（单图 min-max 归一化）
+            # Spatial position encoding (per graph, min-max normalization).
             pos = getattr(g, 'pos', None)
             if pos is None:
                 S = node_features.size(0)
@@ -231,7 +231,7 @@ class StaticGraphTransformerPredictor(nn.Module):
 
             pos_enc = self.generate_spatial_pos_encoding(pos, node_features.size(1))
 
-            # 保存序列和原始索引
+            # Store sequence and original index.
             seq = node_features + pos_enc  # [S, E]
             valid_graphs_data.append({
                 'seq': seq,
@@ -249,25 +249,25 @@ class StaticGraphTransformerPredictor(nn.Module):
                 )
             return torch.zeros(0, self.output_projection[-2].out_features, device=device)
         
-        # 第二步：批量处理Transformer部分（这是关键优化）
-        # 找到最大序列长度
+        # Step 2: batch the Transformer part (key optimization).
+        # Find the maximum sequence length.
         max_seq_len = max(item['seq_len'] for item in valid_graphs_data)
         batch_size = len(valid_graphs_data)
         embed_dim = valid_graphs_data[0]['seq'].size(1)
         
-        # 创建padded batch
+        # Create a padded batch.
         padded_seqs = torch.zeros(batch_size, max_seq_len, embed_dim, device=device)
         
         for i, item in enumerate(valid_graphs_data):
             seq_len = item['seq_len']
             padded_seqs[i, :seq_len, :] = item['seq']
         
-        # 批量传入Transformer（这是性能提升的关键！）
+        # Run Transformer in batch (key speed-up).
         # Note: We don't use src_key_padding_mask to avoid NestedTensor compatibility issues
         # The Transformer will process all positions, but we only use valid positions in the output
         transformer_output = self.transformer(padded_seqs)  # [B, max_seq_len, E]
         
-        # 第三步：逐图处理后续的attention和readout（因为每个图的序列长度不同）
+        # Step 3: per-graph attention/readout (sequence lengths differ per graph).
         predictions = []
         node_embeddings_list = []
         processed_indices = []
@@ -276,7 +276,7 @@ class StaticGraphTransformerPredictor(nn.Module):
             seq_len = item['seq_len']
             orig_idx = item['orig_idx']
             
-            # 提取该图的Transformer输出（去掉padding部分）
+            # Extract this graph's Transformer output (remove padding).
             H = transformer_output[i, :seq_len, :]  # [S, E]
 
             # Gene-specific attention aggregation over nodes
