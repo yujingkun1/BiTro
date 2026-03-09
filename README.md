@@ -5,7 +5,7 @@ The project supports both **spatial transcriptomics (HEST)** and **bulk RNA‑se
 
 ---
 
-**The code is currently in the process of being refined and improved. In the future, an ipynb file of detailed whole process will be added with demo data.**
+**The code is currently in the process of being refined and improved. An ipynb file of detailed whole process will be added with demo data. Due to the limitation of git, the demo data will be uploaded in cloud storage later**
 
 ---
 
