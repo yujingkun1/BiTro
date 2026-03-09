@@ -12,7 +12,7 @@ import torch
 from torch.utils.data import Dataset
 import json
 import pickle
-import scanpy as sc
+import anndata as ad
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -133,7 +133,7 @@ class HESTSpatialDataset(Dataset):
                 st_file = os.path.join(
                     self.hest_data_dir, "st", f"{sample_id}.h5ad")
                 if os.path.exists(st_file):
-                    adata = sc.read_h5ad(st_file)
+                    adata = ad.read_h5ad(st_file)
                     sample_info['adata'] = adata
                     print(
                         f"  - AnnData: {adata.n_obs} spots × {adata.n_vars} genes")
@@ -269,8 +269,12 @@ class HESTSpatialDataset(Dataset):
             self.graph_dir, "hest_intra_spot_graphs.pkl")
 
         if not os.path.exists(aggregated_intra_path):
-            raise FileNotFoundError(
-                f"Intra-spot graphs file not found: {aggregated_intra_path}")
+            print(
+                f"Warning: intra-spot graphs file not found: {aggregated_intra_path}")
+            print("Falling back to per-spot feature graphs or placeholder graphs")
+            self.intra_spot_graphs = {}
+            self.graphs_available = 0
+            return
 
         try:
             with open(aggregated_intra_path, 'rb') as f:

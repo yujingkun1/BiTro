@@ -432,6 +432,17 @@ def setup_device(device_id=0):
     Setup CUDA device
     """
     if torch.cuda.is_available():
+        device_count = torch.cuda.device_count()
+        if device_count == 0:
+            device = torch.device("cpu")
+            print("Using CPU")
+            return device
+
+        if device_id < 0 or device_id >= device_count:
+            print(
+                f"Requested cuda:{device_id} is unavailable; falling back to cuda:0")
+            device_id = 0
+
         device = torch.device(f"cuda:{device_id}")
         print(f"Using device: {device}")
         print(f"GPU: {torch.cuda.get_device_name(device_id)}")

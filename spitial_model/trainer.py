@@ -20,10 +20,13 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
     """
     Train an HEST graph model with early stopping.
     """
+    device = torch.device(device)
+    amp_device = "cuda" if device.type == "cuda" else "cpu"
+    use_amp = amp_device == "cuda"
+
     model.to(device)
     criterion = nn.MSELoss()
-    # Use correct GradScaler initialization to avoid API mismatch
-    scaler = GradScaler('cuda')
+    scaler = GradScaler('cuda', enabled=use_amp)
     best_loss = float('inf')
     best_test_loss = float('inf')
 
@@ -66,7 +69,7 @@ def train_hest_graph_model(model, train_loader, test_loader, optimizer, schedule
             # Flag for skipping batch
             skip_batch = False
 
-            with autocast('cuda'):
+            with autocast(amp_device, enabled=use_amp):
                 # Forward pass (optionally returns node embeddings for cluster loss).
                 out = model(spot_graphs, return_node_embeddings=True)
                 if isinstance(out, tuple) and len(out) == 3:

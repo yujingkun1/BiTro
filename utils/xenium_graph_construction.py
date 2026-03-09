@@ -43,7 +43,7 @@ class XeniumGraphBuilder:
 
     def load_sample_data(self):
         """Load AnnData files and optional metadata/segmentation artifacts."""
-        print("=== 加载Xenium样本 ===")
+        print("=== Loading Xenium samples ===")
         for sid in self.sample_ids:
             try:
                 info = {}
@@ -51,9 +51,9 @@ class XeniumGraphBuilder:
                 if os.path.exists(st_file):
                     adata = sc.read_h5ad(st_file)
                     info['adata'] = adata
-                    print(f"加载样本 {sid}: {adata.n_obs} spots")
+                    print(f"Loading sample {sid}: {adata.n_obs} spots")
                 else:
-                    print(f"警告: 未找到 {st_file}, 跳过样本 {sid}")
+                    print(f"Warning: not found {st_file}, skipping sample {sid}")
                     continue
 
                 # Metadata (optional).
@@ -70,7 +70,7 @@ class XeniumGraphBuilder:
 
                 self.sample_data[sid] = info
             except Exception as e:
-                print(f"错误: 加载样本 {sid} 失败: {e}")
+                print(f"Error: Loading sample {sid}: {e}")
                 continue
 
         if self.features_dir:
@@ -91,20 +91,20 @@ class XeniumGraphBuilder:
                         'positions': positions,
                         'cluster_labels': cluster_labels
                     }
-                    print(f"  已加载 {sid} 的深度特征: {features.shape}")
+                    print(f"  Loaded deep features for {sid}: {features.shape}")
             except Exception as e:
-                print(f"  警告: 加载深度特征失败 ({sid}): {e}")
+                print(f"  Warning: failed to load deep features ({sid}): {e}")
 
     def extract_cells(self, sid):
         """Build a cell table from Xenium ``cells.csv`` (no fallback)."""
         xen = self.load_xenium_files(sid)
         cells_df = xen.get('cells_df')
         if cells_df is None or len(cells_df) == 0:
-            raise RuntimeError(f"Xenium cells.csv 未找到或为空: 无法为样本 {sid} 构建细胞表")
+            raise RuntimeError(f"Xenium cells.csv was not found or is empty; cannot build the cell table for sample {sid}")
 
         # Require coordinate columns.
         if 'x_centroid' not in cells_df.columns or 'y_centroid' not in cells_df.columns:
-            raise RuntimeError("cells.csv 缺少 x_centroid/y_centroid 列，无法继续")
+            raise RuntimeError("cells.csv is missing x_centroid/y_centroid columns; cannot continue")
 
         df = pd.DataFrame({
             'cell_id': cells_df['cell_id'].astype(int).values,
@@ -131,7 +131,7 @@ class XeniumGraphBuilder:
             else:
                 xenium['cells_df'] = None
         except Exception as e:
-            print(f"  警告: 读取 cells.csv 失败: {e}")
+            print(f"  Warning: failed to read cells.csv: {e}")
             xenium['cells_df'] = None
 
         try:
@@ -140,7 +140,7 @@ class XeniumGraphBuilder:
             else:
                 xenium['boundaries_df'] = None
         except Exception as e:
-            print(f"  警告: 读取 cell_boundaries.csv 失败: {e}")
+            print(f"  Warning: failed to read cell_boundaries.csv: {e}")
             xenium['boundaries_df'] = None
 
         # Cluster assignments (Barcode -> Cluster).
@@ -152,7 +152,7 @@ class XeniumGraphBuilder:
             else:
                 xenium['clusters_map'] = {}
         except Exception as e:
-            print(f"  警告: 读取 clusters.csv 失败: {e}")
+            print(f"  Warning: failed to read clusters.csv: {e}")
             xenium['clusters_map'] = {}
 
         # Defer reading the features H5 until needed (may be large).
@@ -162,7 +162,7 @@ class XeniumGraphBuilder:
 
     def build_global_cell_graph(self, sid):
         """Build per-patch (virtual spot) intra-graphs within a global cell field."""
-        print(f"为样本 {sid} 构建按patch的spot内图（patch内每个细胞连接到最近 {self.k_neighbors} 个细胞）...")
+        print(f"For sample {sid} building patch-based intra-spot graphs (each cell connects to its nearest {self.k_neighbors} files)...")
 
         # Xenium-specific outputs.
         xen = self.load_xenium_files(sid)
@@ -172,7 +172,7 @@ class XeniumGraphBuilder:
             cells_df = self.extract_cells(sid)
 
         if cells_df is None or len(cells_df) == 0:
-            print("  警告: 未检测到细胞，返回空字典")
+            print("  Warning: no cells detected; returning an empty dictionary")
             return {}
 
         # ``cells.csv`` column names may vary; support common patterns.
@@ -211,7 +211,7 @@ class XeniumGraphBuilder:
                             except Exception:
                                 continue
             except Exception as e:
-                print(f"  警告: 读取 features h5 失败: {e}")
+                print(f"  Warning: failed to read features h5: {e}")
 
         # Use deep features when aligned with the cell table.
         use_deep = False
@@ -260,7 +260,7 @@ class XeniumGraphBuilder:
         intra_spot_graphs = {}
 
         # Build a local kNN graph within each patch.
-        for patch_id in tqdm(sorted(unique_patches.values()), desc="构建虚拟spot内图"):
+        for patch_id in tqdm(sorted(unique_patches.values()), desc="Building virtual intra-spot graphs"):
             idxs = np.where(patch_indices == patch_id)[0]
             if len(idxs) == 0:
                 continue
@@ -299,12 +299,12 @@ class XeniumGraphBuilder:
 
             intra_spot_graphs[int(patch_id)] = graph
 
-        print(f"  构建了 {len(intra_spot_graphs)} 个虚拟spot内图（patch_size={patch_size}）")
+        print(f"  Built {len(intra_spot_graphs)} virtual intra-spot graphs (patch_size={patch_size})")
         return intra_spot_graphs
 
     def process_all_samples(self):
         for sid in self.sample_ids:
-            print(f"处理样本 {sid} ...")
+            print(f"Processing sample {sid} ...")
             cells_df = self.extract_cells(sid)
             # Xenium: treat each cell as its own spot to keep a compatible interface.
             if len(cells_df) > 0:
@@ -370,12 +370,12 @@ class XeniumGraphBuilder:
             }
 
             # Console summary (mirrors the spatial script style).
-            print(f"\n样本 {sid}:")
-            print(f"  - 总细胞数: {num_cells}")
-            print(f"  - 已分配细胞数: {num_assigned}")
-            print(f"  - 虚拟spot(patch)数量: {intra_count}")
-            print(f"  - 每patch节点数（min/mean/max): {patch_nodes_min}/{patch_nodes_mean:.1f}/{patch_nodes_max}")
-            print(f"  - 虚拟spot内总边数: {total_edges}")
+            print(f"\nSample {sid}:")
+            print(f"  - Total cells: {num_cells}")
+            print(f"  - Assigned cells: {num_assigned}")
+            print(f"  - Number of virtual spots (patches): {intra_count}")
+            print(f"  - Nodes per patch (min/mean/max): {patch_nodes_min}/{patch_nodes_mean:.1f}/{patch_nodes_max}")
+            print(f"  - Total edges inside virtual spots: {total_edges}")
 
         # Save output files.
         intra_graphs_path = os.path.join(output_dir, "xenium_intra_spot_graphs.pkl")
@@ -392,11 +392,11 @@ class XeniumGraphBuilder:
         with open(processed_data_path, 'wb') as f:
             pickle.dump(self.processed_data, f)
 
-        print(f"\n图数据保存至: {output_dir}")
-        print(f"- Spot内图: {intra_graphs_path}")
-        print(f"- Spot间图: {inter_graphs_path}")
-        print(f"- 元数据: {metadata_path}")
-        print(f"- 处理数据: {processed_data_path}")
+        print(f"\nGraph data saved to: {output_dir}")
+        print(f"- Intra-spot graphs: {intra_graphs_path}")
+        print(f"- Inter-spot graph: {inter_graphs_path}")
+        print(f"- Metadata: {metadata_path}")
+        print(f"- Processed data: {processed_data_path}")
         return all_metadata
 
 
@@ -409,7 +409,7 @@ def main():
     # Use Xenium ``cells.csv`` as the presence check (treat as a single sample).
     cells_path = os.path.join(data_dir, "cells.csv")
     if not os.path.exists(cells_path):
-        print(f"未找到 Xenium cells.csv: {cells_path}")
+        print(f"Xenium cells.csv not found: {cells_path}")
         return
 
     sample_ids = ["xenium_sample"]
@@ -432,7 +432,7 @@ def main():
         metadata = {}
         builder.sample_data[sample_ids[0]] = {'adata': adata, 'metadata': metadata}
     except Exception as e:
-        print(f"构建 AnnData 失败: {e}")
+        print(f"Failed to build AnnData: {e}")
         return
 
     # Optional deep features (if present under ``features_dir``).

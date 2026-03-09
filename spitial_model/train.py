@@ -12,6 +12,9 @@ import json
 import warnings
 import argparse
 
+# Keep numba cache writable when downstream imports pull in scanpy/numba.
+os.environ.setdefault("NUMBA_CACHE_DIR", "/tmp/numba_cache")
+
 # Add parent directory to sys.path BEFORE any local imports
 _current_dir = os.path.dirname(os.path.abspath(__file__))
 _parent_dir = os.path.dirname(_current_dir)
@@ -25,7 +28,7 @@ from torch.utils.data import DataLoader
 # Import from local spitial_model submodules
 from spitial_model.dataset import HESTSpatialDataset, collate_fn_hest_graph
 from spitial_model.trainer import train_hest_graph_model, setup_optimizer_and_scheduler, setup_model
-from spitial_model.utils import get_fold_samples, evaluate_model_metrics, save_evaluation_results, plot_training_curves, setup_device, plot_fold_gene_correlation_distribution, plot_metric_across_folds, save_epoch_metrics
+from spitial_model.utils import evaluate_model_metrics, save_evaluation_results, plot_training_curves, setup_device, plot_fold_gene_correlation_distribution, plot_metric_across_folds, save_epoch_metrics
 # fmt: on
 
 warnings.filterwarnings("ignore")
@@ -43,6 +46,91 @@ def convert_numpy_types(obj):
         f'Object of type {obj.__class__.__name__} is not JSON serializable')
 
 
+def parse_sample_ids(sample_ids_env):
+    """Parse a comma-separated sample id list from the environment."""
+    if not sample_ids_env:
+        return None
+
+    sample_ids = []
+    seen = set()
+    for sample_id in sample_ids_env.split(","):
+        sample_id = sample_id.strip()
+        if sample_id and sample_id not in seen:
+            sample_ids.append(sample_id)
+            seen.add(sample_id)
+    return sample_ids or None
+
+
+def discover_sample_ids(hest_data_dir, explicit_sample_ids=None):
+    """Resolve the ordered sample id list used for CV planning."""
+    if explicit_sample_ids:
+        return explicit_sample_ids
+
+    st_dir = os.path.join(hest_data_dir, "st")
+    if not os.path.isdir(st_dir):
+        raise FileNotFoundError(f"ST directory not found: {st_dir}")
+
+    sample_ids = sorted(
+        os.path.splitext(name)[0]
+        for name in os.listdir(st_dir)
+        if name.endswith(".h5ad")
+    )
+    if not sample_ids:
+        raise RuntimeError(f"No .h5ad samples found under: {st_dir}")
+    return sample_ids
+
+
+def build_cv_plan(sample_ids, cv_mode, all_fold_results, start_fold, heldouts_env=None):
+    """Build fold tuples as (fold_idx, train_samples, test_samples)."""
+    if cv_mode == "loo":
+        if heldouts_env:
+            requested = parse_sample_ids(heldouts_env) or []
+            missing = [sample_id for sample_id in requested if sample_id not in sample_ids]
+            if missing:
+                raise ValueError(
+                    f"Held-out sample(s) not found: {missing}. Available: {sorted(sample_ids)}"
+                )
+            heldout_samples = requested
+            print(f"✓ LOO held-out specified: {heldout_samples}")
+        else:
+            heldout_samples = list(sample_ids)
+
+        fold_plan = []
+        for fold_idx, heldout in enumerate(heldout_samples):
+            if fold_idx in all_fold_results:
+                continue
+            train_samples = [sample_id for sample_id in sample_ids if sample_id != heldout]
+            fold_plan.append((fold_idx, train_samples, [heldout]))
+        return fold_plan
+
+    if cv_mode != "kfold":
+        raise ValueError(f"Unknown CV_MODE: {cv_mode}")
+
+    if not sample_ids:
+        raise RuntimeError("No samples available for k-fold CV")
+
+    num_folds = min(10, len(sample_ids))
+    if num_folds == 1:
+        print("Warning: only one sample available; k-fold will reuse it for both train and test")
+        return [(0, list(sample_ids), list(sample_ids))]
+
+    fold_chunks = [
+        list(chunk)
+        for chunk in np.array_split(np.array(sample_ids, dtype=object), num_folds)
+        if len(chunk) > 0
+    ]
+    fold_plan = []
+    for fold_idx, test_samples in enumerate(fold_chunks[start_fold:], start=start_fold):
+        if fold_idx in all_fold_results:
+            continue
+        train_samples = [
+            sample_id for idx, chunk in enumerate(fold_chunks)
+            if idx != fold_idx for sample_id in chunk
+        ]
+        fold_plan.append((fold_idx, train_samples, list(test_samples)))
+    return fold_plan
+
+
 def main():
     """Main training workflow - supports 10-fold and leave-one-out cross validation"""
     
@@ -51,32 +139,71 @@ def main():
     parser.add_argument('--output_dir', type=str, 
                        default=os.environ.get('OUTPUT_DIR', './log_normalized'),
                        help='Output directory for logs, results, and checkpoints (default: ./log_normalized or from OUTPUT_DIR env var)')
+    parser.add_argument('--hest_data_dir', type=str,
+                        default=os.environ.get('HEST_DATA_DIR', '/data/yujk/hovernet2feature/HEST/hest_data'),
+                        help='HEST dataset root directory')
+    parser.add_argument('--graph_dir', type=str,
+                        default=os.environ.get('SPATIAL_GRAPH_DIR', '/data/yujk/hovernet2feature/hest_graphs_dinov3_other_cancer'),
+                        help='Spatial graph directory')
+    parser.add_argument('--features_dir', type=str,
+                        default=os.environ.get('SPATIAL_FEATURE_DIR', '/data/yujk/hovernet2feature/hest_dinov3_other_cancer'),
+                        help='Spatial feature directory')
+    parser.add_argument('--gene_file', type=str,
+                        default=os.environ.get('GENE_FILE', '/data/yujk/hovernet2feature/HEST-Bench/HCC/mean_50genes.txt'),
+                        help='Gene list file')
+    parser.add_argument('--sample_ids', type=str,
+                        default=os.environ.get('SAMPLE_IDS'),
+                        help='Comma-separated sample ids to use')
+    parser.add_argument('--cv_mode', type=str,
+                        default=os.environ.get('CV_MODE', 'loo'),
+                        choices=['loo', 'kfold'],
+                        help='Cross-validation mode')
+    parser.add_argument('--cv_heldout', type=str,
+                        default=os.environ.get('CV_HELDOUT') or os.environ.get('LOO_HELDOUT'),
+                        help='Comma-separated held-out sample ids for leave-one-out mode')
+    parser.add_argument('--cuda_device_id', type=int,
+                        default=int(os.environ.get('CUDA_DEVICE_ID', '0')),
+                        help='CUDA device id')
+    parser.add_argument('--use_transfer_learning', type=str,
+                        default=os.environ.get('USE_TRANSFER_LEARNING', 'false'),
+                        choices=['true', 'false'],
+                        help='Whether to use transfer learning')
+    parser.add_argument('--freeze_backbone', type=str,
+                        default=os.environ.get('FREEZE_BACKBONE', 'false'),
+                        choices=['true', 'false'],
+                        help='Whether to freeze backbone layers')
+    parser.add_argument('--bulk_model_path', type=str,
+                        default=os.environ.get('BULK_MODEL_PATH', '/data/yujk/hovernet2feature/best_BRCA_lora_model_cluster.pt'),
+                        help='Bulk model checkpoint path for transfer learning')
+    parser.add_argument('--numba_cache_dir', type=str,
+                        default=os.environ.get('NUMBA_CACHE_DIR', '/tmp/numba_cache'),
+                        help='Writable numba cache directory')
     args = parser.parse_args()
+
+    os.environ["NUMBA_CACHE_DIR"] = args.numba_cache_dir
     
     # Set output directory
     output_dir = args.output_dir
     checkpoint_dir = os.path.join(output_dir, 'checkpoints')
     
     # Configuration parameters
-    hest_data_dir = "/data/yujk/hovernet2feature/HEST/hest_data"
-    graph_dir = "/data/yujk/hovernet2feature/hest_graphs_dinov3_other_cancer"
-    features_dir = "/data/yujk/hovernet2feature/hest_dinov3_other_cancer"
+    hest_data_dir = args.hest_data_dir
+    graph_dir = args.graph_dir
+    features_dir = args.features_dir
 
     # Specify gene file
-    gene_file = "/data/yujk/hovernet2feature/HEST-Bench/HCC/mean_50genes.txt"
+    gene_file = args.gene_file
 
     batch_size = 128
-    num_epochs = 60
-    learning_rate = 1e-5
+    num_epochs = 10
+    learning_rate = 1e-4
     weight_decay = 1e-5   # Use a standard, non-zero weight decay.
     feature_dim = 128
 
     # Transfer learning configuration.
-    use_transfer_learning = os.environ.get(
-        "USE_TRANSFER_LEARNING", "false").lower() == "true"
-    bulk_model_path = "/data/yujk/hovernet2feature/best_BRCA_lora_model_cluster.pt"
-    freeze_backbone = os.environ.get(
-        "FREEZE_BACKBONE", "false").lower() == "true"
+    use_transfer_learning = args.use_transfer_learning.lower() == "true"
+    bulk_model_path = args.bulk_model_path
+    freeze_backbone = args.freeze_backbone.lower() == "true"
 
     # Early stopping parameters
     patience = 5
@@ -84,8 +211,12 @@ def main():
 
     # Cross-validation mode
     # options: "kfold" (existing 10-fold) or "loo" (leave-one-out)
-    cv_mode = os.environ.get("CV_MODE", "kfold")
+    cv_mode = args.cv_mode
     start_fold = 0  # only used for kfold
+    device_id = args.cuda_device_id
+    explicit_sample_ids = parse_sample_ids(args.sample_ids)
+    sample_ids = discover_sample_ids(hest_data_dir, explicit_sample_ids)
+    heldouts_env = args.cv_heldout
 
     # Gene variance normalization control
     # Set to True to apply per-gene variance normalization, False to disable
@@ -93,9 +224,15 @@ def main():
 
     print("=== HEST Spatial Supervised Training ===")
     print("✓ Using direct file reading (no HEST API required)")
-    print("✓ Using 897 intersection genes")
+    print(f"✓ Samples discovered: {sample_ids}")
     print(f"✓ CV mode: {cv_mode}")
+    print(f"✓ HEST data directory: {hest_data_dir}")
+    print(f"✓ Graph directory: {graph_dir}")
+    print(f"✓ Feature directory: {features_dir}")
     print(f"✓ Gene file: {gene_file}")
+    print(f"✓ Explicit sample ids arg: {explicit_sample_ids}")
+    print(f"✓ CUDA device id: {device_id}")
+    print(f"✓ NUMBA cache dir: {args.numba_cache_dir}")
     print(f"✓ Gene variance normalization: {'Enabled' if use_gene_normalization else 'Disabled'}")
     if use_transfer_learning:
         print(f"✓ Transfer Learning enabled from bulkmodel: {bulk_model_path}")
@@ -108,7 +245,7 @@ def main():
     print(f"✓ Loss: MSE + optional cluster regularizer")
 
     # Setup device
-    device = setup_device(device_id=1)
+    device = setup_device(device_id=device_id)
 
     # Math/precision optimizations
     try:
@@ -146,57 +283,16 @@ def main():
         except Exception as e:
             print(f"Warning: Could not load temporary results file: {e}")
 
-    if cv_mode == "kfold":
-        # Execute 10-fold cross validation (starting from specified fold)
-        # Skip folds that have already been completed
-        fold_plan = []
-        for fi in range(start_fold, 10):
-            if fi not in all_fold_results:
-                fold_plan.append((fi,)+get_fold_samples(fi))
-    elif cv_mode == "loo":
-        # Build leave-one-out plan by scanning all samples from the fold definition union
-        # Reuse get_fold_samples to enumerate all samples across folds
-        all_samples = []
-        for fi in range(0, 10):
-            try:
-                tr, te = get_fold_samples(fi)
-                for s in tr + te:
-                    if s not in all_samples:
-                        all_samples.append(s)
-            except Exception:
-                # utils may define fewer than 10 folds (e.g., 6); stop when KeyError
-                break
-        if not all_samples:
-            raise RuntimeError("No samples discovered for leave-one-out CV")
-
-        # Support specifying held-out sample(s) via environment variable
-        heldouts_env = os.environ.get(
-            "CV_HELDOUT") or os.environ.get("LOO_HELDOUT")
-        if heldouts_env:
-            requested = [s.strip()
-                         for s in heldouts_env.split(",") if s.strip()]
-            # unique while preserving order
-            seen = set()
-            requested = [s for s in requested if not (
-                s in seen or seen.add(s))]
-            missing = [s for s in requested if s not in all_samples]
-            if missing:
-                raise ValueError(
-                    f"Held-out sample(s) not found: {missing}. Available: {sorted(all_samples)}")
-            print(f"✓ LOO held-out specified: {requested}")
-            fold_plan = []
-            for i, heldout in enumerate(requested):
-                if i not in all_fold_results:
-                    fold_plan.append((i, [s for s in all_samples if s not in {heldout}], [heldout]))
-        else:
-            # default: iterate all samples as held-out one by one
-            # Skip folds that have already been completed
-            fold_plan = []
-            for i, heldout in enumerate(all_samples):
-                if i not in all_fold_results:
-                    fold_plan.append((i, [s for s in all_samples if s != heldout], [heldout]))
-    else:
-        raise ValueError(f"Unknown CV_MODE: {cv_mode}")
+    fold_plan = build_cv_plan(
+        sample_ids=sample_ids,
+        cv_mode=cv_mode,
+        all_fold_results=all_fold_results,
+        start_fold=start_fold,
+        heldouts_env=heldouts_env,
+    )
+    if not fold_plan:
+        print("✓ No remaining folds to process")
+        return
 
     # Show summary of folds to be processed
     if all_fold_results:
@@ -290,7 +386,7 @@ def main():
         # Train model
         train_losses, test_losses, epoch_mean_gene_corrs, epoch_overall_corrs = train_hest_graph_model(
             model, train_loader, test_loader, optimizer, scheduler,
-            num_epochs=num_epochs, device="cuda:1", patience=patience, min_delta=min_delta, fold_idx=fold_idx,
+            num_epochs=num_epochs, device=device, patience=patience, min_delta=min_delta, fold_idx=fold_idx,
             cluster_loss_weight=0.1, checkpoint_path=best_model_path
         )
 

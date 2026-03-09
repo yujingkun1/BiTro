@@ -537,7 +537,7 @@ class BulkStaticGraphBuilder:
         
         # When checkpointing is enabled, initialize bookkeeping without preloading data.
         if self.checkpoint_dir:
-            print("\n=== 初始化检查点状态（按需加载，节省内存）===")
+            print("\n=== Initializing checkpoint state (lazy loading to save memory) ===")
             # Track processed slide IDs only (do not preload checkpoints).
             self.processed_data['train'] = {}
             self.processed_data['test'] = {}
@@ -545,15 +545,15 @@ class BulkStaticGraphBuilder:
             # Count processed slides.
             train_checkpoints = self.get_checkpoint_file_list('train')
             test_checkpoints = self.get_checkpoint_file_list('test')
-            print(f"  发现训练集已处理切片: {len(train_checkpoints)}")
-            print(f"  发现测试集已处理切片: {len(test_checkpoints)}")
+            print(f"  Processed train slides found: {len(train_checkpoints)}")
+            print(f"  Processed test slides found: {len(test_checkpoints)}")
         
         # List feature files (without loading them).
         train_feature_files = self.get_feature_file_list('train')
         test_feature_files = self.get_feature_file_list('test')
         
         # Train split: load and process slides one by one.
-        print("\n处理训练集...")
+        print("\nProcessing train split...")
         if 'train' not in self.processed_data:
             self.processed_data['train'] = {}
         
@@ -582,7 +582,7 @@ class BulkStaticGraphBuilder:
                 required_columns = [f'feature_{i}' for i in range(128)] + ['x', 'y', 'image_name', 'cluster_label']
                 missing_cols = [col for col in required_columns if col not in df.columns]
                 if missing_cols:
-                    print(f"警告: 文件 {feature_file} 缺少列: {missing_cols}")
+                    print(f"Warning: file {feature_file} is missing columns: {missing_cols}")
                     continue
                 
                 # Convert to absolute WSI coordinates.
@@ -600,17 +600,17 @@ class BulkStaticGraphBuilder:
                 del df, df_processed, result
                 
             except Exception as e:
-                print(f"错误: 无法处理 {feature_file}: {e}")
+                print(f"Error: could not process {feature_file}: {e}")
                 import traceback
                 traceback.print_exc()
                 continue
         
         if skipped_count > 0:
-            print(f"  跳过已处理的切片: {skipped_count} 个")
-        print(f"  新处理切片: {processed_count} 个")
+            print(f"  Skipped already processed slides: {skipped_count} ")
+        print(f"  Newly processed slides: {processed_count} ")
         
         # Test split: load and process slides one by one.
-        print("\n处理测试集...")
+        print("\nProcessing test split...")
         if 'test' not in self.processed_data:
             self.processed_data['test'] = {}
         
@@ -639,7 +639,7 @@ class BulkStaticGraphBuilder:
                 required_columns = [f'feature_{i}' for i in range(128)] + ['x', 'y', 'image_name', 'cluster_label']
                 missing_cols = [col for col in required_columns if col not in df.columns]
                 if missing_cols:
-                    print(f"警告: 文件 {feature_file} 缺少列: {missing_cols}")
+                    print(f"Warning: file {feature_file} is missing columns: {missing_cols}")
                     continue
                 
                 # Convert to absolute WSI coordinates.
@@ -657,18 +657,18 @@ class BulkStaticGraphBuilder:
                 del df, df_processed, result
                 
             except Exception as e:
-                print(f"错误: 无法处理 {feature_file}: {e}")
+                print(f"Error: could not process {feature_file}: {e}")
                 import traceback
                 traceback.print_exc()
                 continue
         
         if skipped_count > 0:
-            print(f"  跳过已处理的切片: {skipped_count} 个")
-        print(f"  新处理切片: {processed_count} 个")
+            print(f"  Skipped already processed slides: {skipped_count} ")
+        print(f"  Newly processed slides: {processed_count} ")
         
-        print(f"\n处理完成:")
-        print(f"  - 训练集切片: {len(self.processed_data['train'])}")
-        print(f"  - 测试集切片: {len(self.processed_data['test'])}")
+        print(f"\nProcessing completed:")
+        print(f"  - Train slides: {len(self.processed_data['train'])}")
+        print(f"  - Test slides: {len(self.processed_data['test'])}")
         
         # Graph availability summary.
         total_slides = len(self.processed_data['train']) + len(self.processed_data['test'])
@@ -682,20 +682,20 @@ class BulkStaticGraphBuilder:
                 else:
                     slides_without_graphs += 1
         
-        print(f"\n建图统计:")
-        print(f"  - 总切片数: {total_slides}")
-        print(f"  - 成功建图切片: {slides_with_graphs}")
-        print(f"  - 仅保留原始特征切片: {slides_without_graphs}")
+        print(f"\nGraph construction statistics:")
+        print(f"  - Total slides: {total_slides}")
+        print(f"  - Slides with graphs: {slides_with_graphs}")
+        print(f"  - Slides keeping only original features: {slides_without_graphs}")
         
     def process_single_slide_new_logic(self, cells_df, slide_id, patient_id):
         """Process a single slide while preserving all cells (new logic)."""
-        print(f"处理切片: {slide_id} (患者: {patient_id})")
+        print(f"Processing slide: {slide_id} (patient: {patient_id})")
         
         if cells_df is None or len(cells_df) == 0:
-            print(f"  - 警告: 切片 {slide_id} 没有细胞数据")
+            print(f"  - Warning: slide {slide_id} has no cell data")
             return None
             
-        print(f"  - 细胞数量: {len(cells_df)}")
+        print(f"  - Number of cells: {len(cells_df)}")
         
         # Extract full-cell features, coordinates, and cluster labels.
         all_cell_features = self.extract_all_cell_features_with_clusters(cells_df)
@@ -704,7 +704,7 @@ class BulkStaticGraphBuilder:
         
         # Find matching patch files for this slide.
         patch_files = self.find_patch_files_by_slide(slide_id)
-        print(f"  - 匹配的Patch文件数量: {len(patch_files)}")
+        print(f"  - Number of matched patch files: {len(patch_files)}")
         
         has_graphs = False
         intra_patch_graphs = {}
@@ -730,13 +730,13 @@ class BulkStaticGraphBuilder:
                 inter_patch_graph = self.build_inter_patch_graph(patches)
                 has_graphs = True
                 
-                print(f"  - 成功构建图: Patch内图 {len(intra_patch_graphs)} 个")
-                print(f"  - Patch间图: {inter_patch_graph.edge_index.shape[1]} 条边")
+                print(f"  - Successfully built graphs: intra-patch graphs {len(intra_patch_graphs)} ")
+                print(f"  - Inter-patch graph: {inter_patch_graph.edge_index.shape[1]} edges")
             else:
-                print(f"  - 未能成功分配细胞到patch，将保留原始特征")
+                print(f"  - Failed to assign cells to patches; keeping original features")
                 inter_patch_graph = Data(x=torch.empty((0, 2)), edge_index=torch.empty((2, 0)), pos=torch.empty((0, 2)))
         else:
-            print(f"  - 未找到匹配的patch文件，将保留原始特征")
+            print(f"  - No matching patch files found; keeping original features")
             cells_df['patch_id'] = -1
             inter_patch_graph = Data(x=torch.empty((0, 2)), edge_index=torch.empty((2, 0)), pos=torch.empty((0, 2)))
         
@@ -796,14 +796,14 @@ class BulkStaticGraphBuilder:
         # Find matching columns (case-level).
         bulk_cols = self.case_to_bulk_cols.get(patient_id, [])
         if not bulk_cols:
-            print(f"警告: 未找到病例 {patient_id} 的bulk数据")
+            print(f"Warning: no bulk data found for patient {patient_id}")
             return None
         
         bulk_values = self.bulk_data[bulk_cols].values.astype(np.float32)
         if bulk_values.ndim == 2 and bulk_values.shape[1] > 1:
             # Multiple columns: average across columns.
-            print(f"信息: 病例 {patient_id} 有 {bulk_values.shape[1]} 列bulk数据，使用平均值")
-            print(f"  - 可用列: {bulk_cols}")
+            print(f"Info: patient {patient_id} has {bulk_values.shape[1]} bulk data columns; using the mean value")
+            print(f"  - Available columns: {bulk_cols}")
             return np.mean(bulk_values, axis=1)
         
         # Single column: return as (N,).
@@ -811,7 +811,7 @@ class BulkStaticGraphBuilder:
     
     def save_selected_feature_filenames(self, output_dir):
         """Save selected train/test feature filenames."""
-        print("=== 保存特征文件名列表 ===")
+        print("=== Saving feature filename lists ===")
         
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
@@ -821,11 +821,11 @@ class BulkStaticGraphBuilder:
             txt_path = os.path.join(output_dir, f"{split}_selected_feature_files.txt")
             with open(txt_path, 'w') as f:
                 f.write('\n'.join(filenames))
-            print(f"  - {split}集文件列表: {txt_path} (共 {len(filenames)} 个)")
+            print(f"  - {split} split file list: {txt_path} (total {len(filenames)} files)")
     
     def save_graphs_slide_logic(self, output_dir):
         """Save constructed graphs using per-slide checkpoints to reduce memory usage."""
-        print("=== 保存图结构和完整细胞数据（切片级别，从检查点加载）===")
+        print("=== Saving graph structures and full cell data (slide level, loaded from checkpoints) ===")
 
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
@@ -835,10 +835,10 @@ class BulkStaticGraphBuilder:
             # List checkpoint files.
             checkpoint_files = self.get_checkpoint_file_list(split)
             if not checkpoint_files:
-                print(f"{split}集没有找到检查点文件，跳过")
+                print(f"{split} split has no checkpoint files; skipping")
                 continue
 
-            print(f"{split}集发现 {len(checkpoint_files)} 个检查点文件，开始分批加载并保存")
+            print(f"{split} split found {len(checkpoint_files)} checkpoint files; loading and saving them in batches")
 
             # Process in batches to reduce peak memory usage.
             batch_size = 5
@@ -863,7 +863,7 @@ class BulkStaticGraphBuilder:
                 end_idx = min((batch_idx + 1) * batch_size, len(checkpoint_files))
                 batch_files = checkpoint_files[start_idx:end_idx]
 
-                print(f"  处理{split}集第 {batch_idx + 1}/{total_batches} 批 ({len(batch_files)} 个文件)...")
+                print(f"  Processing {split} split batch {batch_idx + 1}/{total_batches} ({len(batch_files)} files)...")
 
                 # Load checkpoints for this batch.
                 for checkpoint_file in batch_files:
@@ -897,13 +897,13 @@ class BulkStaticGraphBuilder:
                                 'cell_feature_dim': slide_data['all_cell_features'].shape[1]
                             }
                     except Exception as e:
-                        print(f"警告: 无法加载检查点 {checkpoint_path}: {e}")
+                        print(f"Warning: failed to load checkpoint {checkpoint_path}: {e}")
                         continue
 
                 # After each batch (except the last), save partial results to avoid
                 # accumulating too much in memory.
                 if batch_idx < total_batches - 1:  # Save partial results for non-final batches.
-                    print(f"    第 {batch_idx + 1} 批处理完成，保存中间结果...")
+                    print(f"    Batch {batch_idx + 1} completed; saving intermediate results...")
                     self._save_split_data_partial(split, intra_graphs, inter_graphs, bulk_expressions,
                                                 all_cell_features, all_cell_positions, cluster_labels,
                                                 graph_status, cell_to_graph_mappings, slide_to_patient_mapping,
@@ -945,21 +945,21 @@ class BulkStaticGraphBuilder:
             slide_mappings_path = os.path.join(output_dir, f"bulk_{split}_slide_to_patient_mapping.pkl")
             metadata_path = os.path.join(output_dir, f"bulk_{split}_metadata.json")
 
-            print(f"{split}集保存完成:")
-            print(f"  - 总切片数: {total_slides}")
-            print(f"  - 覆盖患者数: {unique_patients}")
-            print(f"  - 有图数据切片: {slides_with_graphs}")
-            print(f"  - 无图数据切片: {slides_without_graphs} (保留完整DINO特征)")
-            print(f"  - Patch内图: {intra_path}")
-            print(f"  - Patch间图: {inter_path}")
-            print(f"  - Bulk表达: {bulk_path}")
-            print(f"  - 细胞特征: {features_path}")
-            print(f"  - 细胞坐标: {positions_path}")
-            print(f"  - 聚类标签: {clusters_path}")
-            print(f"  - 图状态: {status_path}")
-            print(f"  - 细胞映射: {mappings_path}")
-            print(f"  - 切片映射: {slide_mappings_path}")  # slide -> patient mapping
-            print(f"  - 元数据: {metadata_path}")
+            print(f"{split} split save completed:")
+            print(f"  - Total slides: {total_slides}")
+            print(f"  - Covered patients: {unique_patients}")
+            print(f"  - Slides with graph data: {slides_with_graphs}")
+            print(f"  - Slides without graph data: {slides_without_graphs} (full DINO features kept)")
+            print(f"  - Intra-patch graphs: {intra_path}")
+            print(f"  - Inter-patch graph: {inter_path}")
+            print(f"  - Bulk expression: {bulk_path}")
+            print(f"  - Cell features: {features_path}")
+            print(f"  - Cell coordinates: {positions_path}")
+            print(f"  - Cluster labels: {clusters_path}")
+            print(f"  - Graph status: {status_path}")
+            print(f"  - Cell mappings: {mappings_path}")
+            print(f"  - Slide mappings: {slide_mappings_path}")  # slide -> patient mapping
+            print(f"  - Metadata: {metadata_path}")
         
         # Save global config.
         config = {
@@ -983,7 +983,7 @@ class BulkStaticGraphBuilder:
         with open(config_path, 'w') as f:
             json.dump(config, f, indent=2)
         
-        print(f"\n配置文件: {config_path}")
+        print(f"\nConfig file: {config_path}")
         return metadata
 
     def _save_split_data_partial(self, split, intra_graphs, inter_graphs, bulk_expressions,
@@ -1038,7 +1038,7 @@ class BulkStaticGraphBuilder:
                               graph_status, cell_to_graph_mappings, slide_to_patient_mapping,
                               metadata, output_dir):
         """Save final split data (merging all batches via checkpoints)."""
-        print(f"  合并并保存{split}集最终结果...")
+        print(f"  Merging and saving {split} final split results...")
 
         # Check whether temporary batch folders exist.
         temp_pattern = f"temp_{split}_batch_*"
@@ -1046,9 +1046,9 @@ class BulkStaticGraphBuilder:
         temp_dirs = glob.glob(os.path.join(output_dir, temp_pattern))
 
         if temp_dirs:
-            print(f"  发现 {len(temp_dirs)} 个临时批次，需要合并")
+            print(f"  Found {len(temp_dirs)} temporary batches that need merging")
             # Reload full data from per-slide checkpoints.
-            print(f"  重新从检查点加载{split}集的完整数据...")
+            print(f"  Reloading {split} full split data from checkpoints...")
             checkpoint_dir_path = os.path.join(self.checkpoint_dir, split)
             all_checkpoints = self.load_all_checkpoints(split)
 
@@ -1089,58 +1089,58 @@ class BulkStaticGraphBuilder:
         slide_mappings_path = os.path.join(output_dir, f"bulk_{split}_slide_to_patient_mapping.pkl")
         metadata_path = os.path.join(output_dir, f"bulk_{split}_metadata.json")
 
-        print(f"  开始保存{split}集数据文件...")
+        print(f"  Starting to save {split} split data files...")
 
-        print(f"  保存Patch内图...")
+        print(f"  Saving intra-patch graphs...")
         with open(intra_path, 'wb') as f:
             pickle.dump(intra_graphs, f)
-        print(f"  ✓ Patch内图保存完成")
+        print(f"  ✓ Intra-patch graphs saved")
 
-        print(f"  保存Patch间图...")
+        print(f"  Saving inter-patch graph...")
         with open(inter_path, 'wb') as f:
             pickle.dump(inter_graphs, f)
-        print(f"  ✓ Patch间图保存完成")
+        print(f"  ✓ Inter-patch graph saved")
 
-        print(f"  保存Bulk表达...")
+        print(f"  Saving bulk expression...")
         with open(bulk_path, 'wb') as f:
             pickle.dump(bulk_expressions, f)
-        print(f"  ✓ Bulk表达保存完成")
+        print(f"  ✓ Bulk expression saved")
 
-        print(f"  保存细胞特征...")
+        print(f"  Saving cell features...")
         with open(features_path, 'wb') as f:
             pickle.dump(all_cell_features, f)
-        print(f"  ✓ 细胞特征保存完成")
+        print(f"  ✓ Cell features saved")
 
-        print(f"  保存细胞坐标...")
+        print(f"  Saving cell coordinates...")
         with open(positions_path, 'wb') as f:
             pickle.dump(all_cell_positions, f)
-        print(f"  ✓ 细胞坐标保存完成")
+        print(f"  ✓ Cell coordinates saved")
 
-        print(f"  保存聚类标签...")
+        print(f"  Saving cluster labels...")
         with open(clusters_path, 'wb') as f:
             pickle.dump(cluster_labels, f)
-        print(f"  ✓ 聚类标签保存完成")
+        print(f"  ✓ Cluster labels saved")
 
-        print(f"  保存图状态...")
+        print(f"  Saving graph status...")
         with open(status_path, 'wb') as f:
             pickle.dump(graph_status, f)
-        print(f"  ✓ 图状态保存完成")
+        print(f"  ✓ Graph status saved")
 
-        print(f"  保存细胞映射...")
+        print(f"  Saving cell mappings...")
         with open(mappings_path, 'wb') as f:
             pickle.dump(cell_to_graph_mappings, f)
-        print(f"  ✓ 细胞映射保存完成")
+        print(f"  ✓ Cell mappings saved")
 
-        print(f"  保存切片映射...")
+        print(f"  Saving slide mappings...")
         with open(slide_mappings_path, 'wb') as f:
             pickle.dump(slide_to_patient_mapping, f)
-        print(f"  ✓ 切片映射保存完成")
+        print(f"  ✓ Slide mappings saved")
 
-        print(f"  保存元数据...")
+        print(f"  Saving metadata...")
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2)
-        print(f"  ✓ 元数据保存完成")
-        print(f"  {split}集所有数据保存完毕！")
+        print(f"  ✓ Metadata saved")
+        print(f"  All data for the {split} split has been saved!")
 
         # Summary statistics.
         total_slides = len(metadata)
@@ -1148,21 +1148,21 @@ class BulkStaticGraphBuilder:
         slides_without_graphs = total_slides - slides_with_graphs
         unique_patients = len(set(slide_to_patient_mapping.values()))
 
-        print(f"{split}集保存完成:")
-        print(f"  - 总切片数: {total_slides}")
-        print(f"  - 覆盖患者数: {unique_patients}")
-        print(f"  - 有图数据切片: {slides_with_graphs}")
-        print(f"  - 无图数据切片: {slides_without_graphs} (保留完整DINO特征)")
-        print(f"  - Patch内图: {intra_path}")
-        print(f"  - Patch间图: {inter_path}")
-        print(f"  - Bulk表达: {bulk_path}")
-        print(f"  - 细胞特征: {features_path}")
-        print(f"  - 细胞坐标: {positions_path}")
-        print(f"  - 聚类标签: {clusters_path}")
-        print(f"  - 图状态: {status_path}")
-        print(f"  - 细胞映射: {mappings_path}")
-        print(f"  - 切片映射: {slide_mappings_path}")
-        print(f"  - 元数据: {metadata_path}")
+        print(f"{split} split save completed:")
+        print(f"  - Total slides: {total_slides}")
+        print(f"  - Covered patients: {unique_patients}")
+        print(f"  - Slides with graph data: {slides_with_graphs}")
+        print(f"  - Slides without graph data: {slides_without_graphs} (full DINO features kept)")
+        print(f"  - Intra-patch graphs: {intra_path}")
+        print(f"  - Inter-patch graph: {inter_path}")
+        print(f"  - Bulk expression: {bulk_path}")
+        print(f"  - Cell features: {features_path}")
+        print(f"  - Cell coordinates: {positions_path}")
+        print(f"  - Cluster labels: {clusters_path}")
+        print(f"  - Graph status: {status_path}")
+        print(f"  - Cell mappings: {mappings_path}")
+        print(f"  - Slide mappings: {slide_mappings_path}")
+        print(f"  - Metadata: {metadata_path}")
 
 
 def main():
@@ -1186,31 +1186,31 @@ def main():
     max_train_slides = 200                 # None = all
     max_test_slides = 50                   # None = all
     
-    print("=== Bulk数据集静态图构建（使用预分割patch）- 新逻辑版本（支持断点续传）===")
-    print(f"训练特征目录: {train_features_dir}")
-    print(f"测试特征目录: {test_features_dir}")
-    print(f"Bulk数据文件: {bulk_csv_path}")
-    print(f"Patch目录: {patches_dir}")
-    print(f"WSI输入目录: {wsi_input_dir}")
-    print(f"输出目录: {output_dir}")
-    print(f"检查点目录: {checkpoint_dir}")
-    print(f"配置参数:")
-    print(f"  - Patch内距离阈值: {intra_patch_distance_threshold}px")
-    print(f"  - Patch间k近邻: {inter_patch_k_neighbors}")
-    train_limit_text = max_train_slides if max_train_slides is not None else '全部'
-    test_limit_text = max_test_slides if max_test_slides is not None else '全部'
-    print(f"  - 使用深度特征: {use_deep_features}")
-    print(f"  - 特征维度: {feature_dim}")
-    print(f"  - 每patch最大细胞数: {max_cells_per_patch}")
-    print(f"  - 训练集特征文件上限: {train_limit_text}")
-    print(f"  - 测试集特征文件上限: {test_limit_text}")
-    print(f"  - 断点续传: {'启用' if checkpoint_dir else '禁用'}")
+    print("=== Static graph construction for the bulk dataset (pre-segmented patches, resumable) ===")
+    print(f"Train feature directory: {train_features_dir}")
+    print(f"Test feature directory: {test_features_dir}")
+    print(f"Bulk data file: {bulk_csv_path}")
+    print(f"Patch directory: {patches_dir}")
+    print(f"WSI input directory: {wsi_input_dir}")
+    print(f"Output directory: {output_dir}")
+    print(f"Checkpoint directory: {checkpoint_dir}")
+    print(f"Configuration:")
+    print(f"  - Intra-patch distance threshold: {intra_patch_distance_threshold}px")
+    print(f"  - Inter-patch k-NN: {inter_patch_k_neighbors}")
+    train_limit_text = max_train_slides if max_train_slides is not None else 'all'
+    test_limit_text = max_test_slides if max_test_slides is not None else 'all'
+    print(f"  - Use deep features: {use_deep_features}")
+    print(f"  - Feature dimension: {feature_dim}")
+    print(f"  - Max cells per patch: {max_cells_per_patch}")
+    print(f"  - Train feature file limit: {train_limit_text}")
+    print(f"  - Test feature file limit: {test_limit_text}")
+    print(f"  - Resume support: {'enabled' if checkpoint_dir else 'disabled'}")
     
     # Validate input paths.
-    for path, name in [(train_features_dir, "训练特征目录"), (test_features_dir, "测试特征目录"), 
-                       (bulk_csv_path, "Bulk数据文件"), (patches_dir, "Patch目录"), (wsi_input_dir, "WSI输入目录")]:
+    for path, name in [(train_features_dir, "Train feature directory"), (test_features_dir, "Test feature directory"), 
+                       (bulk_csv_path, "Bulk data file"), (patches_dir, "Patch directory"), (wsi_input_dir, "WSI input directory")]:
         if not os.path.exists(path):
-            print(f"错误: {name}不存在: {path}")
+            print(f"Error: {name} does not exist: {path}")
             return
     
     # Build graphs.
@@ -1241,11 +1241,11 @@ def main():
         metadata = builder.save_graphs_slide_logic(output_dir)
         builder.save_selected_feature_filenames(output_dir)
         
-        print("\n=== 图构建完成（切片级别匹配，0%数据丢失版本）===")
+        print("\n=== Graph construction completed (slide-level matching, 0% data loss version) ===")
         for split in ['train', 'test']:
             total_slides = len(builder.processed_data.get(split, {}))
-            print(f"{split}集:")
-            print(f"  - 切片数: {total_slides}")
+            print(f"{split} split:")
+            print(f"  - Number of slides: {total_slides}")
             if total_slides > 0:
                 # Compute simple stats from processed_data.
                 split_slides = builder.processed_data.get(split, {})
@@ -1255,16 +1255,16 @@ def main():
                     has_graphs_count = sum([1 for s in split_slides.values() if s.get('has_graphs', False)])
                     no_graphs_count = total_slides - has_graphs_count
                     unique_patients = len(set([s['patient_id'] for s in split_slides.values()]))
-                    print(f"  - 覆盖患者数: {unique_patients}")
-                    print(f"  - 平均细胞数/切片: {avg_cells:.0f}")
-                    print(f"  - 平均patch数/切片: {avg_patches:.1f}")
-                    print(f"  - 有图切片: {has_graphs_count}")
-                    print(f"  - 无图切片: {no_graphs_count} (保留完整DINO特征)")
+                    print(f"  - Covered patients: {unique_patients}")
+                    print(f"  - Average cells per slide: {avg_cells:.0f}")
+                    print(f"  - Average patches per slide: {avg_patches:.1f}")
+                    print(f"  - Slides with graphs: {has_graphs_count}")
+                    print(f"  - Slides without graphs: {no_graphs_count} (full DINO features kept)")
         
-        print("\n✅ 完成：实现切片级别精确匹配，支持混合处理（有图增强 + 无图原始特征）")
+        print("\n✅ Completed: slide-level exact matching with hybrid handling (graph-enhanced when available + original features otherwise)")
         
     except Exception as e:
-        print(f"错误: {e}")
+        print(f"Error: {e}")
         import traceback
         traceback.print_exc()
 

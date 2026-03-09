@@ -53,11 +53,11 @@ class HESTDirectReader:
 
     def load_sample_data(self):
         """Load AnnData, metadata, and optional segmentation/features for samples."""
-        print("=== 直接加载HEST数据文件 ===")
+        print("=== Loading HEST data files directly ===")
 
         for sample_id in self.sample_ids:
             try:
-                print(f"加载样本: {sample_id}")
+                print(f"Loading sample: {sample_id}")
 
                 sample_info = {}
 
@@ -70,7 +70,7 @@ class HESTDirectReader:
                     print(
                         f"  - AnnData: {adata.n_obs} spots × {adata.n_vars} genes")
                 else:
-                    print(f"  - 警告: 未找到AnnData文件: {st_file}")
+                    print(f"  - Warning: AnnData file not found: {st_file}")
                     continue
 
                 # 2) Metadata
@@ -80,7 +80,7 @@ class HESTDirectReader:
                     with open(metadata_file, 'r') as f:
                         metadata = json.load(f)
                     sample_info['metadata'] = metadata
-                    print(f"  - 元数据: {metadata.get('tissue', 'unknown')} 组织")
+                    print(f"  - Metadata: {metadata.get('tissue', 'unknown')} tissue")
                 else:
                     sample_info['metadata'] = {}
 
@@ -90,9 +90,9 @@ class HESTDirectReader:
                 if os.path.exists(cellvit_file):
                     cellvit_df = pd.read_parquet(cellvit_file)
                     sample_info['cellvit'] = cellvit_df
-                    print(f"  - 细胞分割: {len(cellvit_df)} 个细胞")
+                    print(f"  - Cell segmentation: {len(cellvit_df)} cells")
                 else:
-                    print(f"  - 警告: 未找到细胞分割文件: {cellvit_file}")
+                    print(f"  - Warning: cell segmentation file not found: {cellvit_file}")
                     sample_info['cellvit'] = None
 
                 # 4) Image patches (optional)
@@ -100,18 +100,18 @@ class HESTDirectReader:
                     self.hest_data_dir, "patches", f"{sample_id}.h5")
                 if os.path.exists(patches_file):
                     sample_info['patches_file'] = patches_file
-                    print(f"  - 图像patches: 可用")
+                    print(f"  - Image patches: available")
                 else:
                     sample_info['patches_file'] = None
-                    print(f"  - 警告: 未找到patches文件")
+                    print(f"  - Warning: patches file not found")
 
                 self.sample_data[sample_id] = sample_info
 
             except Exception as e:
-                print(f"  错误: 加载样本 {sample_id} 失败: {e}")
+                print(f"  Error: Loading sample {sample_id}: {e}")
                 continue
 
-        print(f"成功加载 {len(self.sample_data)} 个样本")
+        print(f"Successfully loaded {len(self.sample_data)} samples")
 
         # Optional deep features.
         if self.features_dir:
@@ -119,7 +119,7 @@ class HESTDirectReader:
 
     def load_deep_features(self):
         """Load per-cell deep feature NPZ files for each sample (optional)."""
-        print("=== 加载深度特征文件 ===")
+        print("=== Loading deep feature files ===")
 
         for sample_id in self.sample_ids:
             try:
@@ -128,7 +128,7 @@ class HESTDirectReader:
                     self.features_dir, f"{sample_id}_combined_features.npz")
 
                 if os.path.exists(feature_file):
-                    print(f"加载样本 {sample_id} 的深度特征...")
+                    print(f"Loading sample {sample_id} deep features...")
 
                     # Use allow_pickle=True because metadata may store objects/dicts.
                     data = np.load(feature_file, allow_pickle=True)
@@ -153,7 +153,7 @@ class HESTDirectReader:
                         else:
                             metadata = {}
                     except Exception as meta_e:
-                        print(f"    警告: metadata解析失败: {meta_e}")
+                        print(f"    Warning: failed to parse metadata: {meta_e}")
                         metadata = {}
 
                     # Align lengths if features/positions mismatch.
@@ -163,7 +163,7 @@ class HESTDirectReader:
                         if n_pos != n_feat:
                             n_min = min(n_feat, n_pos)
                             print(
-                                f"    警告: features与positions长度不一致: feats={n_feat}, pos={n_pos}，将裁剪为 {n_min}")
+                                f"    Warning: features and positions have different lengths: feats={n_feat}, pos={n_pos}; trimming both to {n_min}")
                             features = features[:n_min]
                             positions = positions[:n_min]
                             n_feat = n_min
@@ -175,7 +175,7 @@ class HESTDirectReader:
                             cluster_labels = data['cluster_labels']
                             # Type/shape sanity checks.
                             if getattr(cluster_labels, 'ndim', 1) != 1 or cluster_labels.shape[0] != features.shape[0]:
-                                print("    警告: cluster_labels 维度或长度与 features 不一致，将忽略")
+                                print("    Warning: cluster_labels shape or length does not match features; ignoring it")
                                 cluster_labels = None
                     except Exception as _:
                         cluster_labels = None
@@ -190,23 +190,23 @@ class HESTDirectReader:
                         'cluster_labels': cluster_labels
                     }
 
-                    print(f"  - 特征形状: {features.shape}")
-                    print(f"  - 特征维度: {features.shape[1]}")
-                    print(f"  - 细胞数量: {features.shape[0]}")
+                    print(f"  - Feature shape: {features.shape}")
+                    print(f"  - Feature dimension: {features.shape[1]}")
+                    print(f"  - Number of cells: {features.shape[0]}")
                     if positions is not None:
-                        print(f"  - 坐标可用: {positions.shape}")
+                        print(f"  - Coordinates available: {positions.shape}")
 
                 else:
-                    print(f"  警告: 未找到样本 {sample_id} 的特征文件: {feature_file}")
+                    print(f"  Warning: sample {sample_id} not found: {feature_file}")
 
             except Exception as e:
-                print(f"  错误: 加载样本 {sample_id} 特征失败: {e}")
+                print(f"  Error: Loading sample {sample_id}: {e}")
 
-        print(f"成功加载 {len(self.deep_features)} 个样本的深度特征")
+        print(f"Successfully loaded deep features for {len(self.deep_features)} samples")
 
     def extract_cell_features_from_cellvit(self, sample_id):
         """Extract a cell table with coordinates and simple geometry features."""
-        print(f"提取样本 {sample_id} 的细胞特征...")
+        print(f"Extracting features for sample {sample_id}...")
 
         sample_info = self.sample_data[sample_id]
         cellvit_df = sample_info.get('cellvit')
@@ -217,7 +217,7 @@ class HESTDirectReader:
         if deep is not None and deep.get('positions') is not None:
             positions = deep['positions']
             n = positions.shape[0]
-            print(f"  使用NPZ中的positions作为细胞坐标，对齐长度: {n}")
+            print(f"  Using positions from the NPZ file as cell coordinates; aligned length: {n}")
             # If CellViT data is missing or misaligned, build a minimal table from positions only.
             cells_data = []
             for idx in range(n):
@@ -234,15 +234,15 @@ class HESTDirectReader:
             return pd.DataFrame(cells_data)
 
         if cellvit_df is None or len(cellvit_df) == 0:
-            print(f"  警告: 样本 {sample_id} 无细胞分割数据且无positions，使用spot中心点")
+            print(f"  Warning: sample {sample_id} has no cell segmentation data and no positions; using spot centers")
             return self.create_spot_based_features(sample_info['adata'])
 
         # Parse geometry and extract centroid + simple shape statistics.
         cells_data = []
 
-        print(f"  正在解析 {len(cellvit_df)} 个细胞的几何数据...")
+        print(f"  Parsing geometry for {len(cellvit_df)} cells...")
 
-        for idx in tqdm(range(len(cellvit_df)), desc="  解析细胞坐标"):
+        for idx in tqdm(range(len(cellvit_df)), desc="  Parsing cell coordinates"):
             try:
                 row = cellvit_df.iloc[idx]
 
@@ -280,7 +280,7 @@ class HESTDirectReader:
 
             except Exception as e:
                 if idx < 10:
-                    print(f"    警告: 处理细胞 {idx} 时出错: {e}")
+                    print(f"    Warning: error while processing cell {idx}: {e}")
                 # Fallback defaults.
                 cells_data.append({
                     'cell_id': idx,
@@ -292,15 +292,15 @@ class HESTDirectReader:
                 })
 
         if not cells_data:
-            print(f"  警告: 未能提取到细胞数据，使用spot中心点")
+            print(f"  Warning: failed to extract cell data; using spot centers")
             return self.create_spot_based_features(sample_info['adata'])
 
         cells_df = pd.DataFrame(cells_data)
 
         # Basic coordinate range logging for debugging.
-        print(f"  提取了 {len(cells_df)} 个细胞的特征")
+        print(f"  Extracted features for {len(cells_df)} cells")
         print(
-            f"  细胞坐标范围: X[{cells_df['x'].min():.1f}, {cells_df['x'].max():.1f}], Y[{cells_df['y'].min():.1f}, {cells_df['y'].max():.1f}]")
+            f"   Cell coordinate range: X[{cells_df['x'].min():.1f}, {cells_df['x'].max():.1f}], Y[{cells_df['y'].min():.1f}, {cells_df['y'].max():.1f}]")
 
         return cells_df
 
@@ -323,7 +323,7 @@ class HESTDirectReader:
 
     def assign_cells_to_spots(self, sample_id, cells_df):
         """Assign cells to spots using either direct mapping (Xenium) or distance rules."""
-        print(f"为样本 {sample_id} 分配细胞到spots...")
+        print(f"For sample {sample_id}, assigning cells to spots...")
 
         adata = self.sample_data[sample_id]['adata']
         metadata = self.sample_data[sample_id]['metadata']
@@ -331,12 +331,12 @@ class HESTDirectReader:
 
         # Xenium: treat each cell as a spot and map 1-to-1 (up to min length).
         if st_technology == 'Xenium':
-            print(f"  检测到Xenium技术，直接将细胞映射为spots...")
+            print(f"  Xenium technology detected; mapping cells directly to spots...")
             cells_df = cells_df.copy()
 
             # Spot coordinates.
             spots_coords = adata.obsm['spatial']
-            print(f"  细胞数量: {len(cells_df)}, Spot数量: {len(spots_coords)}")
+            print(f"  Number of cells: {len(cells_df)}, Number of spots: {len(spots_coords)}")
 
             # Direct 1-to-1 mapping (use the smaller count).
             min_count = min(len(cells_df), len(spots_coords))
@@ -348,7 +348,7 @@ class HESTDirectReader:
                 'spot_assignment')] = range(min_count)
 
             assigned_count = min_count
-            print(f"  成功分配: {assigned_count}/{len(cells_df)} 细胞 (Xenium直接映射)")
+            print(f"  Successfully assigned: {assigned_count}/{len(cells_df)} cells (direct Xenium mapping)")
 
             return cells_df
 
@@ -357,9 +357,9 @@ class HESTDirectReader:
 
         # Coordinate range logging can be useful when matching fails.
         print(
-            f"  Spots坐标范围: X[{spots_coords[:, 0].min():.1f}, {spots_coords[:, 0].max():.1f}], Y[{spots_coords[:, 1].min():.1f}, {spots_coords[:, 1].max():.1f}]")
+            f"  Spot coordinate range: X[{spots_coords[:, 0].min():.1f}, {spots_coords[:, 0].max():.1f}], Y[{spots_coords[:, 1].min():.1f}, {spots_coords[:, 1].max():.1f}]")
         print(
-            f"  细胞坐标范围: X[{cells_df['x'].min():.1f}, {cells_df['x'].max():.1f}], Y[{cells_df['y'].min():.1f}, {cells_df['y'].max():.1f}]")
+            f"   Cell coordinate range: X[{cells_df['x'].min():.1f}, {cells_df['x'].max():.1f}], Y[{cells_df['y'].min():.1f}, {cells_df['y'].max():.1f}]")
 
         # Assign each cell to its nearest spot if within a radius threshold.
         cells_df = cells_df.copy()
@@ -367,7 +367,7 @@ class HESTDirectReader:
         cells_df['distance_to_spot'] = float('inf')
 
         # Process all cells (batched to control memory).
-        print(f"  正在为 {len(cells_df)} 个细胞分配到 {len(spots_coords)} 个spots...")
+        print(f"  Assigning {len(cells_df)} cells to {len(spots_coords)} spots...")
 
         assigned_count = 0
         distances_list = []
@@ -382,9 +382,9 @@ class HESTDirectReader:
             batch_cells = cells_df.iloc[start_idx:end_idx]
 
             print(
-                f"  处理批次 {batch_idx+1}/{num_batches} ({len(batch_cells)} 个细胞)")
+                f"  Processing batch {batch_idx+1}/{num_batches} ({len(batch_cells)} files)")
 
-            for cell_idx, cell_row in tqdm(batch_cells.iterrows(), total=len(batch_cells), desc=f"  批次{batch_idx+1}"):
+            for cell_idx, cell_row in tqdm(batch_cells.iterrows(), total=len(batch_cells), desc=f"  Batch {batch_idx+1}"):
                 cell_pos = np.array([cell_row['x'], cell_row['y']])
 
                 # Distances to all spots.
@@ -419,29 +419,29 @@ class HESTDirectReader:
         # Summary statistics.
         assigned_cells = cells_df[cells_df['spot_assignment'] >= 0]
 
-        print(f"  成功分配: {len(assigned_cells)}/{len(cells_df)} 细胞")
+        print(f"  Successfully assigned: {len(assigned_cells)}/{len(cells_df)} cells")
         pixel_size_um = metadata.get('pixel_size_um_estimated', 0.5)
-        print(f"  像素大小: {pixel_size_um} μm/pixel")
+        print(f"  Pixel size: {pixel_size_um} μm/pixel")
 
         if len(distances_list) > 0:
             distances_array = np.array(distances_list)
             print(
-                f"  距离统计: 最小={distances_array.min():.1f}px, 最大={distances_array.max():.1f}px, 平均={distances_array.mean():.1f}px")
+                f"  Distance statistics: min={distances_array.min():.1f}px,, max={distances_array.max():.1f}px,, mean={distances_array.mean():.1f}px")
             print(
-                f"  距离统计(μm): 最小={distances_array.min()*pixel_size_um:.1f}μm, 最大={distances_array.max()*pixel_size_um:.1f}μm, 平均={distances_array.mean()*pixel_size_um:.1f}μm")
+                f"  Distance statistics (μm): min={distances_array.min()*pixel_size_um:.1f}μm,, max={distances_array.max()*pixel_size_um:.1f}μm,, mean={distances_array.mean()*pixel_size_um:.1f}μm")
 
         if len(assigned_cells) > 0:
             spot_counts = assigned_cells['spot_assignment'].value_counts()
             print(
-                f"  每个spot的细胞数: 平均={spot_counts.mean():.1f}, 范围=[{spot_counts.min()}-{spot_counts.max()}]")
+                f"  Cells per spot: mean={spot_counts.mean():.1f},, range=[{spot_counts.min()}-{spot_counts.max()}]")
         else:
-            print(f"  警告: 没有细胞被分配到spots，可能需要调整距离阈值")
+            print(f"  Warning: no cells were assigned to spots; the distance threshold may need adjustment")
 
         return cells_df
 
     def build_intra_spot_graphs(self, sample_id, intra_spot_k_neighbors=8):
         """Build cell-level graphs within each spot using kNN connectivity."""
-        print(f"构建样本 {sample_id} 的spot内图...")
+        print(f"Building sample {sample_id} intra-spot graphs...")
 
         cells_df = self.processed_data[sample_id]['cells']
         # If deep features provide explicit spot grouping, prefer it to avoid misalignment.
@@ -466,7 +466,7 @@ class HESTDirectReader:
         intra_spot_graphs = {}
 
         # Process spot by spot.
-        for spot_idx in tqdm(assigned_cells['spot_assignment'].unique(), desc="构建spot内图"):
+        for spot_idx in tqdm(assigned_cells['spot_assignment'].unique(), desc="Building intra-spot graphs"):
             spot_cells = assigned_cells[assigned_cells['spot_assignment'] == spot_idx].copy(
             )
 
@@ -561,7 +561,7 @@ class HESTDirectReader:
             intra_spot_graphs[int(spot_idx)] = graph
 
         print(
-            f"  构建了 {len(intra_spot_graphs)} 个spot内图，每个spot内使用 {intra_spot_k_neighbors} 近邻连接")
+            f"  Built {len(intra_spot_graphs)} intra-spot graphs, each using {intra_spot_k_neighbors}-NN connections")
         return intra_spot_graphs
 
     def extract_cell_feature_vector(self, cell_row, sample_id=None, cell_idx=None):
@@ -595,7 +595,7 @@ class HESTDirectReader:
 
     def build_inter_spot_graph(self, sample_id):
         """Build a spot-level kNN graph from spot coordinates."""
-        print(f"构建样本 {sample_id} 的spot间图...")
+        print(f"Building sample {sample_id} inter-spot graph...")
 
         adata = self.sample_data[sample_id]['adata']
 
@@ -623,15 +623,15 @@ class HESTDirectReader:
             x=spot_features, edge_index=edge_index, pos=pos)
 
         print(
-            f"  构建了spot间图: {len(spot_positions)} spots, {edge_index.shape[1]} 条边")
+            f"  Built inter-spot graph: {len(spot_positions)} spots, {edge_index.shape[1]} edges")
         return inter_spot_graph
 
     def process_all_samples(self):
         """Process all loaded samples and populate ``processed_data``."""
-        print("=== 处理所有样本 ===")
+        print("=== Processing all samples ===")
 
         for sample_id in self.sample_data.keys():
-            print(f"\n处理样本: {sample_id}")
+            print(f"\nProcessing sample: {sample_id}")
 
             # Extract cell features.
             cells_df = self.extract_cell_features_from_cellvit(sample_id)
@@ -645,11 +645,11 @@ class HESTDirectReader:
                 'adata': self.sample_data[sample_id]['adata']
             }
 
-            print(f"  样本 {sample_id} 处理完成")
+            print(f"  Sample {sample_id} processed successfully")
 
     def save_graphs(self, output_dir):
         """Serialize constructed graphs and metadata to disk."""
-        print("=== 保存图结构 ===")
+        print("=== Saving graph structures ===")
 
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
@@ -658,7 +658,7 @@ class HESTDirectReader:
         all_metadata = {}
 
         for sample_id in self.processed_data.keys():
-            print(f"\n保存样本 {sample_id} 的图...")
+            print(f"\nSaving sample {sample_id}...")
 
             # Build graphs.
             intra_spot_graphs = self.build_intra_spot_graphs(
@@ -715,11 +715,11 @@ class HESTDirectReader:
         with open(processed_data_path, 'wb') as f:
             pickle.dump(self.processed_data, f)
 
-        print(f"\n图数据保存至: {output_dir}")
-        print(f"- Spot内图: {intra_graphs_path}")
-        print(f"- Spot间图: {inter_graphs_path}")
-        print(f"- 元数据: {metadata_path}")
-        print(f"- 处理数据: {processed_data_path}")
+        print(f"\nGraph data saved to: {output_dir}")
+        print(f"- Intra-spot graphs: {intra_graphs_path}")
+        print(f"- Inter-spot graph: {inter_graphs_path}")
+        print(f"- Metadata: {metadata_path}")
+        print(f"- Processed data: {processed_data_path}")
 
         return all_metadata
 
@@ -758,7 +758,7 @@ def main():
     MAX_SAMPLES = None
 
     # Discover available samples from the ``st`` directory.
-    print("=== 检查可用样本 ===")
+    print("=== Checking available samples ===")
     available_samples = []
 
     # Scan sample files under the st directory.
@@ -770,8 +770,8 @@ def main():
                 available_samples.append(sample_id)
 
     available_samples.sort()
-    print(f"发现可用样本总数: {len(available_samples)}")
-    print(f"样本列表: {available_samples}")
+    print(f"Total available samples found: {len(available_samples)}")
+    print(f"Sample list: {available_samples}")
 
     # Choose samples based on the configuration flags above.
     if USE_SPECIFIED_SAMPLES is True:
@@ -780,18 +780,18 @@ def main():
         sample_ids = [sid for sid in specified if sid in available_samples]
         missing = [sid for sid in specified if sid not in available_samples]
         if missing:
-            print(f"警告: 指定样本中未发现的样本将被忽略: {missing}")
-        print(f"\n选择模式: 使用指定样本列表")
+            print(f"Warning: requested samples not found will be ignored: {missing}")
+        print(f"\nSelection mode: using the requested sample list")
         if MAX_SAMPLES is not None:
             sample_ids = sample_ids[:MAX_SAMPLES]
-            print(f"最大样本数限制: {MAX_SAMPLES}")
+            print(f"Maximum sample limit: {MAX_SAMPLES}")
     elif USE_ALL_SAMPLES:
         # Use all available samples.
         sample_ids = available_samples
         if MAX_SAMPLES is not None:
             sample_ids = sample_ids[:MAX_SAMPLES]
-        print(f"\n选择模式: 使用所有样本")
-        print(f"最大样本数限制: {MAX_SAMPLES if MAX_SAMPLES else '无限制'}")
+        print(f"\nSelection mode: using all samples")
+        print(f"Maximum sample limit: {MAX_SAMPLES if MAX_SAMPLES else 'unlimited'}")
     else:
         # Example heuristic: TENX samples are often colorectal cancer.
         preferred_samples = ['TENX128', 'TENX139',
@@ -805,32 +805,32 @@ def main():
                 sid for sid in available_samples if sid.startswith('TENX')]
             sample_ids = tenx_samples if tenx_samples else available_samples
 
-        print(f"\n选择模式: 仅结直肠癌样本")
+        print(f"\nSelection mode: colorectal cancer samples only")
 
-    print(f"将处理的样本数: {len(sample_ids)}")
-    print(f"样本列表: {sample_ids}")
+    print(f"Number of samples to process: {len(sample_ids)}")
+    print(f"Sample list: {sample_ids}")
 
     if not sample_ids:
-        print("错误: 未找到可用的样本数据")
+        print("Error: no available sample data found")
         return
 
     # Graph parameters.
     inter_spot_k_neighbors = 6  # Inter-spot kNN neighbors.
 
-    print("\n=== HEST数据集图构建（直接文件读取+深度特征）===")
-    print(f"HEST数据目录: {hest_data_dir}")
-    print(f"深度特征目录: {features_dir}")
-    print(f"输出目录: {output_dir}")
-    print(f"样本列表: {sample_ids}")
-    print(f"配置参数:")
-    print(f"  - Spot间k近邻: {inter_spot_k_neighbors}")
+    print("\n=== HEST graph construction (direct file loading + deep features) ===")
+    print(f"HESTData directory: {hest_data_dir}")
+    print(f"Deep feature directory: {features_dir}")
+    print(f"Output directory: {output_dir}")
+    print(f"Sample list: {sample_ids}")
+    print(f"Configuration:")
+    print(f"  - Inter-spot k-NN: {inter_spot_k_neighbors}")
     print(
-        f"  - 使用深度特征: {os.path.exists(features_dir) if features_dir else False}")
-    print(f"  - 特征维度: 128 (深度特征) 或自动扩展至128")
+        f"  - Use deep features: {os.path.exists(features_dir) if features_dir else False}")
+    print(f"  - Feature dimension: 128 (deep features) or automatically expanded to 128")
 
     # Validate input directories.
     if not os.path.exists(hest_data_dir):
-        print(f"错误: HEST数据目录不存在: {hest_data_dir}")
+        print(f"Error: HEST data directory does not exist: {hest_data_dir}")
         return
 
     # Create the graph builder.
@@ -846,7 +846,7 @@ def main():
         builder.load_sample_data()
 
         if not builder.sample_data:
-            print("错误: 未能加载任何HEST数据")
+            print("Error: failed to load any HEST data")
             return
 
         # Process all samples.
@@ -855,17 +855,17 @@ def main():
         # Build and save graphs.
         metadata = builder.save_graphs(output_dir)
 
-        print("\n=== 图构建完成 ===")
+        print("\n=== Graph construction completed ===")
         for sample_id, meta in metadata.items():
-            print(f"样本 {sample_id}:")
-            print(f"  - {meta['intra_graph_count']} 个spot内图")
-            print(f"  - 1 个spot间图（{meta['inter_graph_edges']} 条边）")
+            print(f"Sample {sample_id}:")
+            print(f"  - {meta['intra_graph_count']} intra-spot graphs")
+            print(f"  - 1 inter-spot graph ({meta['inter_graph_edges']} edges)")
             print(
-                f"  - 总计 {meta['num_assigned_cells']}/{meta['num_cells']} 个分配细胞")
-            print(f"  - 组织类型: {meta['tissue']}")
+                f"  - Total assigned cells: {meta['num_assigned_cells']}/{meta['num_cells']} assigned cells")
+            print(f"  - Tissue type: {meta['tissue']}")
 
     except Exception as e:
-        print(f"错误: {e}")
+        print(f"Error: {e}")
         import traceback
         traceback.print_exc()
 

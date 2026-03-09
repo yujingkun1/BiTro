@@ -12,4 +12,9 @@
 *.pkl
 *.gz
 *.zip
+HEST/
+weights/
+log_normalized_notebook/
+demo_data/HEST/
+demo_data/weights/
 *__pycache__
