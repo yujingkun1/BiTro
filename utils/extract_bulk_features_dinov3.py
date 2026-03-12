@@ -3,6 +3,7 @@ import cv2
 import json
 import scipy.io as sio
 import os
+import re
 import torch
 import torchvision.transforms as transforms
 import pandas as pd
@@ -135,6 +136,64 @@ def load_image(image_path):
         raise ValueError(f"Failed to load image: {image_path}")
     return cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
 
+def parse_patch_coords_from_filename(filename):
+    """
+    Parse patch coordinates from filename.
+    Expected pattern: *_level0_{x1}-{y1}-{x2}-{y2}.png
+    """
+    match = re.search(r"_level0_(\d+)-(\d+)-(\d+)-(\d+)", filename)
+    if not match:
+        return None
+    x1, y1, x2, y2 = map(int, match.groups())
+    return x1, y1, x2, y2
+
+def infer_tile_size(image_files):
+    """Infer tile size from patch filenames; fallback to 512 if not found."""
+    for name in image_files:
+        coords = parse_patch_coords_from_filename(name)
+        if coords:
+            x1, y1, x2, y2 = coords
+            return max(1, x2 - x1), max(1, y2 - y1)
+    return 512, 512
+
+def infer_tile_origin(patch_coords):
+    """Infer grid origin from a list of patch coordinate tuples."""
+    if not patch_coords:
+        return 0, 0
+    xs = [c[0] for c in patch_coords]
+    ys = [c[1] for c in patch_coords]
+    return min(xs), min(ys)
+
+def build_cells_by_patch_from_wsi_json(wsi_json_path, tile_w, tile_h, patch_set, origin_x, origin_y):
+    """Build a mapping from patch bounds to cells using a WSI-level HoverNet JSON."""
+    with open(wsi_json_path, "r") as f:
+        data = json.load(f)
+    nuc = data.get("nuc", {})
+    cells_by_patch = {}
+    for cell_id_str, cell in nuc.items():
+        centroid = cell.get("centroid")
+        contour = cell.get("contour")
+        if not centroid or not contour:
+            continue
+        cx, cy = centroid
+        if cx < origin_x or cy < origin_y:
+            continue
+        x1 = int((cx - origin_x) // tile_w) * tile_w + origin_x
+        y1 = int((cy - origin_y) // tile_h) * tile_h + origin_y
+        key = (x1, y1, x1 + tile_w, y1 + tile_h)
+        if key not in patch_set:
+            continue
+        try:
+            cell_id = int(cell_id_str)
+        except Exception:
+            cell_id = cell_id_str
+        cells_by_patch.setdefault(key, []).append({
+            "id": cell_id,
+            "centroid": (cx, cy),
+            "contour": contour,
+        })
+    return cells_by_patch
+
 def extract_features_for_image(args):
     """Extract raw features for a single image patch without PCA."""
     image_path, json_path, mat_path, model_name, processed_log = args
@@ -233,6 +292,113 @@ def extract_features_for_image(args):
         print(f"Error processing {image_name}: {str(e)}")
         raise
     
+    return wsi_name, image_name, patch_number, cell_features, cell_ids, cell_locations, cell_sizes, original_feature_dim
+
+def extract_features_for_patch_from_cells(args):
+    """Extract raw features for a patch using WSI-level JSON cells (no per-patch mat)."""
+    image_path, cells, model_name, processed_log, patch_coords = args
+    image_name = os.path.splitext(os.path.basename(image_path))[0]
+    wsi_name = os.path.basename(os.path.dirname(image_path))
+    patch_number = image_name.split("_patch_")[-1] if "_patch_" in image_name else "unknown"
+
+    logging.info(f"Processing patch (WSI-level JSON): {image_name}")
+    try:
+        original_img = load_image(image_path)
+        h, w = original_img.shape[:2]
+        x1, y1, x2, y2 = patch_coords
+
+        gpu_enabled = torch.cuda.is_available()
+        device_id = WORKER_DEVICE_ID if gpu_enabled else None
+        model, original_feature_dim = get_model_for_device(
+            model_name, device_id if (gpu_enabled and device_id is not None) else None
+        )
+        preprocess = get_preprocess_cached()
+
+        CUDA_AVAILABLE = gpu_enabled and device_id is not None
+        if CUDA_AVAILABLE:
+            device = torch.device(f"cuda:{device_id}")
+        else:
+            device = torch.device("cpu")
+
+        cell_features, cell_ids, cell_locations, cell_sizes = [], [], [], []
+
+        for cell in cells:
+            contour = np.array(cell["contour"], dtype=np.int32)
+            if contour.ndim != 2 or contour.shape[0] < 3:
+                continue
+            # Convert to patch-local coordinates and clip to image bounds
+            contour_local = contour.copy()
+            contour_local[:, 0] -= x1
+            contour_local[:, 1] -= y1
+            contour_local[:, 0] = np.clip(contour_local[:, 0], 0, w - 1)
+            contour_local[:, 1] = np.clip(contour_local[:, 1], 0, h - 1)
+
+            mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.fillPoly(mask, [contour_local], 1)
+
+            if mask.sum() == 0:
+                continue
+
+            ys, xs = np.where(mask > 0)
+            y_min, y_max = ys.min(), ys.max() + 1
+            x_min, x_max = xs.min(), xs.max() + 1
+
+            cell_roi = original_img[y_min:y_max, x_min:x_max].copy()
+            mask_roi = mask[y_min:y_max, x_min:x_max]
+            masked_cell = np.zeros_like(cell_roi)
+            masked_cell[mask_roi == 1] = cell_roi[mask_roi == 1]
+
+            if masked_cell.shape[0] < 10 or masked_cell.shape[1] < 10:
+                continue
+
+            cell_pil = Image.fromarray(masked_cell)
+            input_tensor = preprocess(cell_pil).unsqueeze(0)
+            if CUDA_AVAILABLE:
+                input_tensor = input_tensor.to(device, non_blocking=True)
+
+            if CUDA_AVAILABLE:
+                torch.cuda.set_device(device_id)
+                with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+                    batch_features = model(input_tensor)
+                    if isinstance(batch_features, tuple):
+                        batch_features = batch_features[0]
+                    if len(batch_features.shape) == 4:
+                        batch_features = batch_features.mean(dim=[2, 3])
+                    elif len(batch_features.shape) == 3:
+                        batch_features = batch_features.mean(dim=1)
+                    features = batch_features.squeeze().flatten().detach().cpu().numpy()
+            else:
+                batch_features = model(input_tensor)
+                if isinstance(batch_features, tuple):
+                    batch_features = batch_features[0]
+                if len(batch_features.shape) == 4:
+                    batch_features = batch_features.mean(dim=[2, 3])
+                elif len(batch_features.shape) == 3:
+                    batch_features = batch_features.mean(dim=1)
+                features = batch_features.squeeze().flatten().cpu().numpy()
+
+            if np.isnan(features).any() or np.isinf(features).any():
+                features = np.nan_to_num(features, nan=0.0, posinf=1.0, neginf=-1.0)
+
+            centroid_x = cell["centroid"][0] - x1
+            centroid_y = cell["centroid"][1] - y1
+            area = int(mask.sum())
+            perimeter = float(cv2.arcLength(contour_local, True))
+
+            cell_features.append(features)
+            cell_ids.append(cell["id"])
+            cell_locations.append((centroid_x, centroid_y))
+            cell_sizes.append((area, perimeter))
+
+        with open(processed_log, 'a') as f:
+            f.write(f"{image_path}\n")
+        logging.info(f"Completed patch (WSI-level JSON): {image_name}, extracted {len(cell_features)} cells")
+
+    except Exception as e:
+        logging.error(f"Error processing {image_path}: {str(e)}")
+        print(f"Error processing {image_name}: {str(e)}")
+        raise
+
     return wsi_name, image_name, patch_number, cell_features, cell_ids, cell_locations, cell_sizes, original_feature_dim
 
 def get_feature_extractor(model_name):
@@ -422,20 +588,28 @@ def process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder,
     
     json_wsi_path = os.path.join(json_folder, wsi_name, "json")
     mat_wsi_path = os.path.join(mat_folder, wsi_name, "mat")
+    wsi_json_path = os.path.join(json_folder, "json", f"{wsi_name}.json")
 
-    if not os.path.isdir(json_wsi_path) or not os.path.isdir(mat_wsi_path):
+    use_wsi_level_json = False
+    if os.path.isdir(json_wsi_path) and os.path.isdir(mat_wsi_path):
+        print(f"   • JSON dir: {json_wsi_path}")
+        print(f"   • MAT dir: {mat_wsi_path}")
+    elif os.path.isfile(wsi_json_path):
+        use_wsi_level_json = True
+        print(f"   • JSON file: {wsi_json_path}")
+        print(f"   • MAT dir: not used (WSI-level JSON mode)")
+    else:
         logging.warning(
-            "Missing patch artefacts for %s. Expected json_dir at %s and mat_dir at %s. Skipping.",
+            "Missing patch artefacts for %s. Expected json_dir at %s and mat_dir at %s, "
+            "or WSI-level JSON at %s. Skipping.",
             wsi_name,
             json_wsi_path,
             mat_wsi_path,
+            wsi_json_path,
         )
         print(f"Missing data folders for {wsi_name}, skipping.")
         # Missing inputs are treated as "done" to avoid infinite retries.
         return True
-    
-    print(f"   • JSON dir: {json_wsi_path}")
-    print(f"   • MAT dir: {mat_wsi_path}")
     
     image_files = [f for f in os.listdir(wsi_path) if f.endswith('.png')]
     total_patches = len(image_files)
@@ -450,17 +624,48 @@ def process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder,
         print(f"   • Forcing reprocess of all patches for {wsi_name} (ignoring processed_patches.log)")
     
     args_list = []
-    for image_file in image_files:
-        image_path = os.path.join(wsi_path, image_file)
-        json_path = os.path.join(json_wsi_path, image_file.replace('.png', '.json'))
-        mat_path = os.path.join(mat_wsi_path, image_file.replace('.png', '.mat'))
-        
-        if not os.path.exists(json_path) or not os.path.exists(mat_path):
-            logging.warning(f"Missing json or mat for {image_file} in {wsi_name}, skipped.")
-            continue
-        
-        if image_path not in processed_patches:
-            args_list.append((image_path, json_path, mat_path, model_name, processed_log))
+    if use_wsi_level_json:
+        patch_coords_list = []
+        patch_coords_map = {}
+        for image_file in image_files:
+            coords = parse_patch_coords_from_filename(image_file)
+            if coords:
+                patch_coords_list.append(coords)
+                patch_coords_map[image_file] = coords
+        tile_w, tile_h = infer_tile_size(image_files)
+        origin_x, origin_y = infer_tile_origin(patch_coords_list)
+        patch_set = set(patch_coords_list)
+        print(f"   • Tile size inferred: {tile_w}x{tile_h}")
+        print(f"   • Tile origin inferred: ({origin_x}, {origin_y})")
+        print(f"   • Loading WSI-level JSON for {wsi_name}...")
+        cells_by_patch = build_cells_by_patch_from_wsi_json(
+            wsi_json_path, tile_w, tile_h, patch_set, origin_x, origin_y
+        )
+
+        for image_file in image_files:
+            image_path = os.path.join(wsi_path, image_file)
+            if image_path in processed_patches:
+                continue
+            coords = patch_coords_map.get(image_file)
+            if not coords:
+                logging.warning(f"Unable to parse patch coords for {image_file} in {wsi_name}, skipped.")
+                continue
+            cells = cells_by_patch.get(coords, [])
+            if not cells:
+                continue
+            args_list.append((image_path, cells, model_name, processed_log, coords))
+    else:
+        for image_file in image_files:
+            image_path = os.path.join(wsi_path, image_file)
+            json_path = os.path.join(json_wsi_path, image_file.replace('.png', '.json'))
+            mat_path = os.path.join(mat_wsi_path, image_file.replace('.png', '.mat'))
+            
+            if not os.path.exists(json_path) or not os.path.exists(mat_path):
+                logging.warning(f"Missing json or mat for {image_file} in {wsi_name}, skipped.")
+                continue
+            
+            if image_path not in processed_patches:
+                args_list.append((image_path, json_path, mat_path, model_name, processed_log))
     
     if not args_list:
         print(f"All patches already processed for {wsi_name}")
@@ -506,6 +711,7 @@ def process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder,
             initializer=worker_initializer,
             initargs=(device_queue,),
         ) as pool:
+            worker_fn = extract_features_for_patch_from_cells if use_wsi_level_json else extract_features_for_image
             for (
                 wsi_name_chunk,
                 image_name,
@@ -517,7 +723,7 @@ def process_wsi(wsi_name, wsi_path, json_folder, mat_folder, output_folder,
                 _,
             ) in tqdm(
                 pool.imap(
-                    extract_features_for_image,
+                    worker_fn,
                     args_list,
                     chunksize=max(1, chunk_size // max(1, worker_count)),
                 ),

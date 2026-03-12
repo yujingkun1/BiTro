@@ -56,7 +56,7 @@ def parse_args():
                        help="Patient batch size (None = dynamic search)")
     parser.add_argument("--graph-batch-size", type=int, default=128,
                        help="Graph batch size")
-    parser.add_argument("--num-epochs", type=int, default=60,
+    parser.add_argument("--num-epochs", type=int, default=2,
                        help="Number of epochs")
     parser.add_argument("--learning-rate", type=float, default=1e-4,
                        help="Learning rate")
@@ -225,14 +225,16 @@ def main():
         split='train',
         selected_genes=selected_genes,
         max_samples=args.max_train_samples,
-        tpm_csv_file=args.tpm_csv_file
+        tpm_csv_file=args.tpm_csv_file,
+        apply_gene_normalization=False
     )
     test_dataset = BulkStaticGraphDataset372(
         graph_data_dir=args.graph_data_dir,
         split='test',
         selected_genes=selected_genes,
         max_samples=None,
-        tpm_csv_file=args.tpm_csv_file
+        tpm_csv_file=args.tpm_csv_file,
+        apply_gene_normalization=False
     )
     print(f"Train samples: {len(train_dataset)}, test samples: {len(test_dataset)}")
 
@@ -486,5 +488,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

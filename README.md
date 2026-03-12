@@ -3,9 +3,12 @@
 BiTro is a modular pipeline for **predicting spatial gene expression from histology images**.  
 The project supports both **spatial transcriptomics (HEST)** and **bulk RNA‑seq** settings, with optional **Bidirectional Transfer Learning**.
 
----
+**Demo data**  
+Please download the demo data from:  
+https://drive.google.com/drive/folders/1VUQjz7QaVmPJqz8-ZGSb9GakjPRLPbB5?usp=drive_link  
+Unzip and place the folder under `BiTro/demo_data`.
 
-**The code is currently in the process of being refined and improved. An ipynb file of detailed whole process will be added with demo data. Due to the limitation of git, the demo data will be uploaded in cloud storage later**
+After installing the environment, you can directly run `Bulk_pipeline.ipynb` and `ST_pipeline.ipynb` to reproduce the full models. For better performance, increase the number of training epochs in the notebooks (the demo defaults are intentionally small).
 
 ---
 
@@ -65,6 +68,14 @@ python utils/spatial_graph_construction.py
 ```bash
 python spitial_model/train.py
 ```
+
+**Key parameters (spatial)**  
+- `--hest_data_dir`: HEST data root  
+- `--graph_dir`: spatial graph directory  
+- `--features_dir`: spatial feature directory  
+- `--gene_file`: target gene list  
+- `--cv_mode`: `loo` or `kfold`
+
 ---
 
 ## 3. Bulk Model Pipeline
@@ -73,12 +84,28 @@ The bulk model is trained on WSI‑level graphs to predict bulk RNA‑seq expres
 
 ### 3.1. Bulk data preprocessing
 
-First running HoverNet to segment all cells from images.
+Recommended order (matches the demo notebook):
+1) Extract patches  
+2) Run HoverNet segmentation  
+3) Extract DINOv3 features  
+4) Add cluster labels on the full feature set  
+5) Split train/test  
 
 ```bash
+# 1) Extract patches (WSI -> patch PNGs)
+python utils/extract_patches.py
+
+# 2) Run HoverNet (tile mode)
+# e.g. hovernet-with-feature-extract/run_tile.sh or run_tile_all.sh
+
+# 3) Extract features (requires HoverNet outputs + patches)
 python utils/extract_bulk_features_dinov3.py
-# run this file for cluster label (change file address)
-python utils/cluster_kmeans_features.py
+
+# 4) Add cluster labels to all parquet features
+python utils/cluster_parquet_features.py
+
+# 5) Split features into train/test
+python utils/split_features.py
 ```
 
 
@@ -88,42 +115,66 @@ python utils/cluster_kmeans_features.py
 python utils/bulk_graph_construction.py
 ```
 
-### 3.5. Train the bulk model
+### 3.3. Train the bulk model
 
 ```bash
-python bulk_model/train.py
+python bulk_model/train.py \
+  --graph-data-dir ./demo_data/Graphs/Bulk \
+  --gene-list-file ./demo_data/Gene/BRCA.txt \
+  --features-file ./demo_data/bulk/features.tsv \
+  --tpm-csv-file ./demo_data/bulk/tpm-TCGA-BRCA-1000-million.csv \
+  --batch-size 2 \
+  --graph-batch-size 128 \
+  --num-epochs 60 \
+  --learning-rate 1e-4 \
+  --weight-decay 1e-5 \
+  --use-lora \
+  --lora-r 8 \
+  --lora-alpha 16 \
+  --lora-dropout 0.05 \
+  --lora-freeze-base
 ```
 
 ---
 
 ## 4. Transfer Learning (Optional)
 
-> Note: You can also train purely from scratch without transfer learning by
-> disabling the corresponding flags in `spitial_model/train.py`.
+### 4.1. Bulk → Spatial (transfer to spatial model)
 
-To use a pretrained bulk model as backbone for the spatial model:
+`spitial_model/train.py` supports transfer learning via:
 
-
-`spitial_model/train.py` already supports transfer learning via:
-
-- `use_transfer_learning`: whether to load a bulk checkpoint.
-- `bulk_model_path`: path to the pretrained bulk model.
-- `freeze_backbone` / `TRANSFER_STRATEGY`: control what parts of the model are frozen.
+- `use_transfer_learning`: whether to load a bulk checkpoint  
+- `bulk_model_path`: path to the pretrained bulk model  
+- `freeze_backbone`: whether to freeze backbone layers  
 
 Example (using environment variables):
 
 ```bash
-
 export OUTPUT_DIR=./log_normalized_BRCA_transfer
 export USE_TRANSFER_LEARNING=true
-export BULK_MODEL_PATH=/bulk_model.pt
-export FREEZE_BACKBONE=false        # or true depending on your strategy
+export BULK_MODEL_PATH=/path/to/bulk_model.pt
+export FREEZE_BACKBONE=false
 
 python spitial_model/train.py
 ```
 
-You can also expose these as command‑line arguments if desired (see comments in `spitial_model/train.py`).
+### 4.2. Spatial → Bulk (transfer to bulk model)
+
+`bulk_model/train.py` supports initializing from a spatial checkpoint:
+
+- `--spatial-model-path`: path to a spatial model checkpoint  
+- `--freeze-backbone-from-spatial`: freeze backbone layers when initializing  
+
+Example:
+
+```bash
+python bulk_model/train.py \
+  --graph-data-dir ./demo_data/Graphs/Bulk \
+  --gene-list-file ./demo_data/Gene/BRCA.txt \
+  --features-file ./demo_data/bulk/features.tsv \
+  --tpm-csv-file ./demo_data/bulk/tpm-TCGA-BRCA-1000-million.csv \
+  --spatial-model-path /path/to/spatial_checkpoint.pt \
+  --freeze-backbone-from-spatial
+```
 
 ---
-
-
