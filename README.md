@@ -7,6 +7,7 @@ The project supports both **spatial transcriptomics (HEST)** and **bulk RNA‑se
 Please download the demo data from:  
 https://drive.google.com/drive/folders/1VUQjz7QaVmPJqz8-ZGSb9GakjPRLPbB5?usp=drive_link  
 Unzip and place the folder under `BiTro/demo_data`.
+The HEST sample id used in ST training are provided in HEST_sample.txt.
 
 After installing the environment, you can directly run `Bulk_pipeline.ipynb` and `ST_pipeline.ipynb` to reproduce the full models. For better performance, increase the number of training epochs in the notebooks (the demo defaults are intentionally small).
 

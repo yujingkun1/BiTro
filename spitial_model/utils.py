@@ -27,22 +27,10 @@ def get_fold_samples(fold_idx, all_samples=None):
     Get train/test splits for 10-fold cross validation (fixed splits matching original implementation)
     """
     # fold_splits = {
-    #     0: ['TENX152', 'MISC73', 'MISC72', 'MISC71', 'MISC70'],
-    #     1: ['MISC69', 'MISC68', 'MISC67', 'MISC66', 'MISC65'],
-    #     2: ['MISC64', 'MISC63', 'MISC62', 'MISC58', 'MISC57'],
-    #     3: ['MISC56', 'MISC51', 'MISC50', 'MISC49', 'MISC48'],
-    #     4: ['MISC47', 'MISC46', 'MISC45', 'MISC44', 'MISC43'],
-    #     5: ['MISC42', 'MISC41', 'MISC40', 'MISC39', 'MISC38'],
-    #     6: ['MISC37', 'MISC36', 'MISC35', 'MISC34', 'MISC33'],
-    #     7: ['TENX92', 'TENX91', 'TENX90', 'TENX89', 'TENX49'],
-    #     8: ['TENX29', 'ZEN47', 'ZEN46', 'ZEN45', 'ZEN44'],
-    #     9: ['ZEN43', 'ZEN42', 'ZEN39', 'ZEN38']
-    # }
-    # fold_splits = {
     #     0: ['TENX152','TENX92', 'TENX91', 'TENX90', 'TENX89', 'TENX49'],
     #     1: ['TENX29', 'ZEN47', 'ZEN46', 'ZEN45', 'ZEN44'],
     #     2: ['ZEN43', 'ZEN42', 'ZEN39', 'ZEN38']
-    # }
+    # } COAD
     # fold_splits = {
     #     0:['SPA154', 'SPA153', 'SPA152', 'SPA151', 'SPA150', 'SPA149'],
     #     1:['SPA148', 'SPA147', 'SPA146', 'SPA145', 'SPA144', 'SPA143'],
@@ -50,31 +38,20 @@ def get_fold_samples(fold_idx, all_samples=None):
     #     3:['SPA136', 'SPA135', 'SPA134', 'SPA133', 'SPA132', 'SPA131'],
     #     4:['SPA130', 'SPA129', 'SPA128', 'SPA127', 'SPA126', 'SPA125'],
     #     5:['SPA124', 'SPA123', 'SPA122', 'SPA121', 'SPA120', 'SPA119'],
-    # }
+    # } BRCA
     # fold_splits = {
     #     0:['NCBI770', 'NCBI769', 'NCBI768', 'NCBI767', 'NCBI766', 'NCBI765',
     #    'NCBI764', 'NCBI763', 'NCBI762', 'NCBI761', 'NCBI760', 'NCBI759'],
-
-    # }
-    # fold_splits = {
-    #     0: ['TENX118','TENX141'], # LUNG
+    # } CSCC
     # }
     fold_splits = {
         0: ['NCBI642', 'NCBI643'], # HCC
     }
     # fold_splits = {
-    #     0: ['TENX116', 'TENX126','TENX140'], # PAAD
-    # }
-    # fold_splits = {
     #     0: ['MEND139', 'MEND140', 'MEND141', 'MEND142', 'MEND143', 'MEND144', 'MEND145', 'MEND146', 'MEND147', 'MEND148', 'MEND149', 'MEND150',
     #     'MEND151', 'MEND152', 'MEND153', 'MEND154', 'MEND155', 'MEND156', 'MEND157', 'MEND158', 'MEND159', 'MEND160','MEND161','MEND162'],#PRAD
     # }
-    # fold_splits = {
-    #     0: ['NCBI783', 'NCBI785','TENX95','TENX99'], # IDC
-    # }
-    # fold_splits = {
-    #     0: ['ZEN36', 'ZEN40','ZEN48','ZEN49'], # READ
-    # }
+
     test_samples = fold_splits[fold_idx]
     train_samples = []
     for fold, samples in fold_splits.items():
