@@ -3,6 +3,8 @@
 BiTro is a modular pipeline for **predicting spatial gene expression from histology images**.  
 The project supports both **spatial transcriptomics (HEST)** and **bulk RNA‑seq** settings, with optional **Bidirectional Transfer Learning**.
 
+[arXiv](https://arxiv.org/abs/2603.14897)
+
 **Demo data**  
 Please download the demo data from:  
 https://drive.google.com/drive/folders/1VUQjz7QaVmPJqz8-ZGSb9GakjPRLPbB5?usp=drive_link  
