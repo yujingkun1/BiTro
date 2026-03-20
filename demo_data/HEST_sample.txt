@@ -1,0 +1,25 @@
+# fold_splits = {
+    #     0: ['TENX152','TENX92', 'TENX91', 'TENX90', 'TENX89', 'TENX49'],
+    #     1: ['TENX29', 'ZEN47', 'ZEN46', 'ZEN45', 'ZEN44'],
+    #     2: ['ZEN43', 'ZEN42', 'ZEN39', 'ZEN38']
+    # } COAD
+    # fold_splits = {
+    #     0:['SPA154', 'SPA153', 'SPA152', 'SPA151', 'SPA150', 'SPA149'],
+    #     1:['SPA148', 'SPA147', 'SPA146', 'SPA145', 'SPA144', 'SPA143'],
+    #     2:['SPA142', 'SPA141', 'SPA140', 'SPA139', 'SPA138', 'SPA137'],
+    #     3:['SPA136', 'SPA135', 'SPA134', 'SPA133', 'SPA132', 'SPA131'],
+    #     4:['SPA130', 'SPA129', 'SPA128', 'SPA127', 'SPA126', 'SPA125'],
+    #     5:['SPA124', 'SPA123', 'SPA122', 'SPA121', 'SPA120', 'SPA119'],
+    # } BRCA
+    # fold_splits = {
+    #     0:['NCBI770', 'NCBI769', 'NCBI768', 'NCBI767', 'NCBI766', 'NCBI765',
+    #    'NCBI764', 'NCBI763', 'NCBI762', 'NCBI761', 'NCBI760', 'NCBI759'],
+    # } CSCC
+    # }
+    fold_splits = {
+        0: ['NCBI642', 'NCBI643'], # HCC
+    }
+    # fold_splits = {
+    #     0: ['MEND139', 'MEND140', 'MEND141', 'MEND142', 'MEND143', 'MEND144', 'MEND145', 'MEND146', 'MEND147', 'MEND148', 'MEND149', 'MEND150',
+    #     'MEND151', 'MEND152', 'MEND153', 'MEND154', 'MEND155', 'MEND156', 'MEND157', 'MEND158', 'MEND159', 'MEND160','MEND161','MEND162'],#PRAD
+    # }
