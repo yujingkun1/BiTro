@@ -19,3 +19,11 @@ log_normalized_notebook/
 demo_data/HEST/
 demo_data/weights/
 *__pycache__
+# 模型权重
+UNI.bin
+
+# 特征输出（大文件）
+demo_data/Feature/Bulk/PRAD/
+
+# 你的实验/临时目录
+real_utilise/
