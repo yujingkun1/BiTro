@@ -21,9 +21,9 @@ demo_data/weights/
 *__pycache__
 # 模型权重
 UNI.bin
-
+.codex
 # 特征输出（大文件）
-demo_data/Feature/Bulk/PRAD/
+demo_data/Feature
 
 # 你的实验/临时目录
 real_utilise/

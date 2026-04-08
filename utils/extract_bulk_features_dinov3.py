@@ -17,6 +17,7 @@ import torchvision.transforms as transforms
 from PIL import Image
 from tqdm import tqdm
 from skimage import measure
+from sklearn.decomposition import PCA
 from multiprocessing import cpu_count, set_start_method, get_context
 
 warnings.filterwarnings("ignore")
@@ -28,6 +29,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 try:
     cv2.setNumThreads(0)
@@ -48,17 +50,43 @@ PREPROCESS_CACHE = None
 WORKER_DEVICE_ID = None
 
 UNI_MODEL_PATH = "/data/hdd2/shanggk/BiTro/UNI.bin"
-ORIGINAL_FEATURE_DIM = 1024  # UNI ViT-L/16 embedding size
+DINOV3_MODEL_PATH = "/data/yujk/hovernet2feature/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+DINOV3_REPO_DIR = "/data/yujk/hovernet2feature/dinov3"
 
+ORIGINAL_FEATURE_DIM = 1024  # UNI / DinoV3 ViT-L/16 embedding size
 
+# --------------------------------------------------------------------------
+# Optional transformers import for DinoV3 availability reporting
+# --------------------------------------------------------------------------
+try:
+    import transformers  # noqa: F401
+    from transformers import AutoModel, AutoImageProcessor  # noqa: F401
+    DINOV3_AVAILABLE = True
+except Exception:
+    DINOV3_AVAILABLE = False
+
+# --------------------------------------------------------------------------
+# Logging
+# --------------------------------------------------------------------------
+logging.basicConfig(
+    filename="feature_extraction.log",
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+
+# --------------------------------------------------------------------------
+# Utility / resource functions
+# --------------------------------------------------------------------------
 def elevate_process_priority():
     """Attempt to raise the priority of the current process and pin all CPUs."""
     try:
         proc = psutil.Process(os.getpid())
+
         if hasattr(proc, "cpu_affinity"):
             cpu_total = psutil.cpu_count() or os.cpu_count()
             if cpu_total:
                 proc.cpu_affinity(list(range(cpu_total)))
+
         try:
             proc.nice(-20)
         except psutil.AccessDenied:
@@ -68,36 +96,6 @@ def elevate_process_priority():
                 pass
     except Exception as exc:
         print(f"Warning: Unable to elevate process priority: {exc}")
-
-
-def get_preprocess_cached():
-    """Return and cache the preprocessing pipeline."""
-    global PREPROCESS_CACHE
-    if PREPROCESS_CACHE is None:
-        PREPROCESS_CACHE = get_preprocess_transform()
-    return PREPROCESS_CACHE
-
-
-def get_model_for_device(model_name, device_id=None):
-    """
-    Load and cache the UNI model per device.
-    device_id: None for CPU, otherwise integer GPU index.
-    """
-    global MODEL_CACHE
-    device_key = "cpu" if device_id is None else f"cuda:{device_id}"
-
-    if device_key in MODEL_CACHE:
-        return MODEL_CACHE[device_key]
-
-    model, feature_dim = get_feature_extractor(model_name)
-    model.eval()
-
-    if device_id is not None and torch.cuda.is_available():
-        torch.cuda.set_device(device_id)
-        model = model.to(device_key)
-
-    MODEL_CACHE[device_key] = (model, feature_dim)
-    return MODEL_CACHE[device_key]
 
 
 def worker_initializer(device_queue):
@@ -123,33 +121,24 @@ def worker_initializer(device_queue):
         WORKER_DEVICE_ID = None
 
 
-# Configure logging
-logging.basicConfig(
-    filename="feature_extraction.log",
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
+def get_preprocess_transform():
+    """Return the preprocessing transformation pipeline."""
+    return transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(
+            mean=(0.485, 0.456, 0.406),
+            std=(0.229, 0.224, 0.225),
+        ),
+    ])
 
-# Verify PyTorch version and CUDA availability
-print(f"PyTorch version: {torch.__version__}")
-logging.info(f"PyTorch version: {torch.__version__}")
 
-cuda_available = torch.cuda.is_available()
-print(f"CUDA available: {cuda_available}")
-logging.info(f"CUDA available: {cuda_available}")
-
-if cuda_available:
-    gpu_count = torch.cuda.device_count()
-    print(f"Detected {gpu_count} CUDA device(s).")
-    logging.info(f"Detected {gpu_count} CUDA device(s).")
-    for gpu_idx in range(gpu_count):
-        gpu_name = torch.cuda.get_device_name(gpu_idx)
-        print(f"GPU {gpu_idx}: {gpu_name}")
-        logging.info(f"GPU {gpu_idx}: {gpu_name}")
-
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+def get_preprocess_cached():
+    """Return and cache the preprocessing pipeline."""
+    global PREPROCESS_CACHE
+    if PREPROCESS_CACHE is None:
+        PREPROCESS_CACHE = get_preprocess_transform()
+    return PREPROCESS_CACHE
 
 
 def load_image(image_path):
@@ -159,7 +148,9 @@ def load_image(image_path):
         raise ValueError(f"Failed to load image: {image_path}")
     return cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
 
-
+# --------------------------------------------------------------------------
+# Filename / patch coordinate helpers
+# --------------------------------------------------------------------------
 def parse_patch_coords_from_filename(filename):
     """
     Parse patch coordinates from filename.
@@ -231,69 +222,141 @@ def build_cells_by_patch_from_wsi_json(wsi_json_path, tile_w, tile_h, patch_set,
 
     return cells_by_patch
 
-
+# --------------------------------------------------------------------------
+# Model loading
+# --------------------------------------------------------------------------
 def get_feature_extractor(model_name):
-    """Return a UNI feature extractor model and its feature dimension."""
-    if model_name.lower() != "uni":
-        print(f"Warning: model_name={model_name}, but this script loads UNI.")
+    """Return a UNI or DinoV3 feature extractor model and its feature dimension."""
+    model_name = model_name.lower()
 
-    if not os.path.exists(UNI_MODEL_PATH):
-        raise RuntimeError(f"UNI model file not found: {UNI_MODEL_PATH}")
+    if model_name == "uni":
+        if not os.path.exists(UNI_MODEL_PATH):
+            raise RuntimeError(f"UNI model file not found: {UNI_MODEL_PATH}")
 
-    print(f"Using local UNI weights: {UNI_MODEL_PATH}")
-    print("Loading UNI ViT-L/16 via timm...")
+        print(f"Using local UNI weights: {UNI_MODEL_PATH}")
+        print("Loading UNI ViT-L/16 via timm...")
 
-    model = timm.create_model(
-        "vit_large_patch16_224",
-        img_size=224,
-        patch_size=16,
-        init_values=1e-5,
-        num_classes=0,
-        dynamic_img_size=False,   # fixed 224 input
-    )
+        model = timm.create_model(
+            "vit_large_patch16_224",
+            img_size=224,
+            patch_size=16,
+            init_values=1e-5,
+            num_classes=0,
+            dynamic_img_size=False,
+        )
 
-    checkpoint = torch.load(UNI_MODEL_PATH, map_location="cpu")
+        checkpoint = torch.load(UNI_MODEL_PATH, map_location="cpu")
 
-    if isinstance(checkpoint, dict):
-        if "model" in checkpoint:
-            state_dict = checkpoint["model"]
-        elif "state_dict" in checkpoint:
-            state_dict = checkpoint["state_dict"]
+        if isinstance(checkpoint, dict):
+            if "model" in checkpoint:
+                state_dict = checkpoint["model"]
+            elif "state_dict" in checkpoint:
+                state_dict = checkpoint["state_dict"]
+            else:
+                state_dict = checkpoint
         else:
             state_dict = checkpoint
+
+        if isinstance(state_dict, dict):
+            state_dict = {
+                k.replace("module.", "", 1) if k.startswith("module.") else k: v
+                for k, v in state_dict.items()
+            }
+
+        model.load_state_dict(state_dict, strict=True)
+        model.eval()
+
+        feature_dim = 1024
+        print(f"Loaded UNI successfully. Output feature dim = {feature_dim}")
+        return model, feature_dim
+
+    elif model_name == "dinov3":
+        if not os.path.exists(DINOV3_MODEL_PATH):
+            raise RuntimeError(f"DinoV3 model file not found: {DINOV3_MODEL_PATH}")
+
+        if not os.path.exists(DINOV3_REPO_DIR):
+            raise RuntimeError(f"DinoV3 repository not found: {DINOV3_REPO_DIR}")
+
+        print(f"Using DINOv3 repository: {DINOV3_REPO_DIR}")
+        print(f"Using local DINOv3 weights: {DINOV3_MODEL_PATH}")
+
+        try:
+            print("Loading DINOv3 ViT-L/16 via torch.hub...")
+            model = torch.hub.load(
+                DINOV3_REPO_DIR,
+                "dinov3_vitl16",
+                source="local",
+                weights=DINOV3_MODEL_PATH,
+                trust_repo=True,
+            )
+            print("✓ Loaded DINOv3 successfully via torch.hub")
+            return model, 1024
+
+        except Exception as e:
+            print(f"torch.hub loading failed: {e}")
+            print("Trying manual loading...")
+
+            checkpoint = torch.load(DINOV3_MODEL_PATH, map_location="cpu")
+
+            if hasattr(checkpoint, "forward"):
+                model = checkpoint
+                print("✓ Loaded model object directly")
+                return model, 1024
+
+            model = timm.create_model(
+                "vit_large_patch16_224",
+                pretrained=False,
+                num_classes=0,
+                global_pool="",
+            )
+
+            if isinstance(checkpoint, dict):
+                if "model" in checkpoint:
+                    state_dict = checkpoint["model"]
+                elif "state_dict" in checkpoint:
+                    state_dict = checkpoint["state_dict"]
+                else:
+                    state_dict = checkpoint
+            else:
+                state_dict = checkpoint
+
+            missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+            print(f"✓ Loaded via timm (missing={len(missing_keys)}, unexpected={len(unexpected_keys)})")
+
+            return model, 1024
+
     else:
-        state_dict = checkpoint
+        raise ValueError(f"Unsupported model_name: {model_name}. Expected 'uni' or 'dinov3'.")
 
-    if isinstance(state_dict, dict):
-        state_dict = {
-            k.replace("module.", "", 1) if k.startswith("module.") else k: v
-            for k, v in state_dict.items()
-        }
 
-    model.load_state_dict(state_dict, strict=True)
+def get_model_for_device(model_name, device_id=None):
+    """
+    Load and cache the model per device.
+    device_id: None for CPU, otherwise integer GPU index.
+    """
+    global MODEL_CACHE
+
+    device_key = f"{model_name.lower()}::" + ("cpu" if device_id is None else f"cuda:{device_id}")
+
+    if device_key in MODEL_CACHE:
+        return MODEL_CACHE[device_key]
+
+    model, feature_dim = get_feature_extractor(model_name)
     model.eval()
 
-    feature_dim = 1024
-    print(f"Loaded UNI successfully. Output feature dim = {feature_dim}")
+    if device_id is not None and torch.cuda.is_available():
+        torch.cuda.set_device(device_id)
+        model = model.to(f"cuda:{device_id}")
 
-    return model, feature_dim
+    MODEL_CACHE[device_key] = (model, feature_dim)
+    return MODEL_CACHE[device_key]
 
-
-def get_preprocess_transform():
-    """Return the preprocessing transformation pipeline for UNI."""
-    return transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=(0.485, 0.456, 0.406),
-            std=(0.229, 0.224, 0.225),
-        ),
-    ])
-
-
-def run_uni_feature_extraction_batch(model, input_tensor, cuda_available=False, device_id=None):
+# --------------------------------------------------------------------------
+# Shared batch inference
+# --------------------------------------------------------------------------
+def run_feature_extraction_batch(model, input_tensor, cuda_available=False, device_id=None):
     """
-    Run UNI on a batch and return a 2D numpy feature array [B, D].
+    Run backend model on a batch and return a 2D numpy feature array [B, D].
     input_tensor: [B, 3, 224, 224]
     """
     if input_tensor.ndim != 4:
@@ -322,10 +385,13 @@ def run_uni_feature_extraction_batch(model, input_tensor, cuda_available=False, 
 
         return batch_features
 
-
+# --------------------------------------------------------------------------
+# Worker functions
+# --------------------------------------------------------------------------
 def extract_features_for_image(args):
-    """Extract raw UNI features for a single image patch without PCA, using batched inference."""
-    image_path, json_path, mat_path, model_name, processed_log, infer_batch_size = args
+    """Extract raw features for a single patch using patch-level MAT inst_map."""
+    image_path, json_path, mat_path, model_name, infer_batch_size = args
+
     image_name = os.path.splitext(os.path.basename(image_path))[0]
     wsi_name = os.path.basename(os.path.dirname(image_path))
     patch_number = image_name.split("_patch_")[-1] if "_patch_" in image_name else "unknown"
@@ -350,8 +416,8 @@ def extract_features_for_image(args):
         )
 
         preprocess = get_preprocess_cached()
-        CUDA_AVAILABLE = gpu_enabled and device_id is not None
-        device = torch.device(f"cuda:{device_id}") if CUDA_AVAILABLE else torch.device("cpu")
+        cuda_ok = gpu_enabled and device_id is not None
+        device = torch.device(f"cuda:{device_id}") if cuda_ok else torch.device("cpu")
 
         cell_tensors = []
         cell_meta = []
@@ -376,14 +442,12 @@ def extract_features_for_image(args):
                 centroid_y, centroid_x = props.centroid
 
                 if y_max <= y_min or x_max <= x_min:
-                    logging.warning(f"[CELL SKIP] Invalid bbox in {image_name}, cell_id={cell_id}, bbox={props.bbox}")
                     continue
 
                 cell_roi = original_img[y_min:y_max, x_min:x_max].copy()
                 mask_roi = cell_mask[y_min:y_max, x_min:x_max]
 
                 if cell_roi.size == 0 or mask_roi.size == 0:
-                    logging.warning(f"[CELL SKIP] Empty ROI in {image_name}, cell_id={cell_id}")
                     continue
 
                 masked_cell = np.zeros_like(cell_roi)
@@ -393,7 +457,7 @@ def extract_features_for_image(args):
                     continue
 
                 cell_pil = Image.fromarray(masked_cell).convert("RGB")
-                input_tensor = preprocess(cell_pil)  # [3, 224, 224]
+                input_tensor = preprocess(cell_pil)
 
                 if input_tensor.ndim != 3:
                     raise ValueError(
@@ -404,13 +468,12 @@ def extract_features_for_image(args):
                 cell_meta.append((
                     int(cell_id),
                     (float(centroid_x), float(centroid_y)),
-                    (float(props.area), float(props.perimeter))
+                    (float(props.area), float(props.perimeter)),
                 ))
 
             except Exception as e:
                 logging.error(f"[CELL ERROR] image={image_name}, cell_id={cell_id}, error={repr(e)}")
                 logging.error(traceback.format_exc())
-                print(f"[CELL ERROR] image={image_name}, cell_id={cell_id}, error={repr(e)}")
                 continue
 
         cell_features, cell_ids, cell_locations, cell_sizes = [], [], [], []
@@ -424,13 +487,13 @@ def extract_features_for_image(args):
 
             batch_tensor = torch.stack(batch_tensors, dim=0)
 
-            if CUDA_AVAILABLE:
+            if cuda_ok:
                 batch_tensor = batch_tensor.pin_memory().to(device, non_blocking=True)
 
-            batch_features = run_uni_feature_extraction_batch(
+            batch_features = run_feature_extraction_batch(
                 model=model,
                 input_tensor=batch_tensor,
-                cuda_available=CUDA_AVAILABLE,
+                cuda_available=cuda_ok,
                 device_id=device_id,
             )
 
@@ -439,9 +502,6 @@ def extract_features_for_image(args):
                 cell_ids.append(cid)
                 cell_locations.append(loc)
                 cell_sizes.append(size)
-
-        with open(processed_log, "a") as f:
-            f.write(f"{image_path}\n")
 
         logging.info(f"Completed patch: {image_name}, extracted {len(cell_features)} cells")
 
@@ -452,12 +512,22 @@ def extract_features_for_image(args):
         print(traceback.format_exc())
         raise
 
-    return wsi_name, image_name, patch_number, cell_features, cell_ids, cell_locations, cell_sizes, original_feature_dim
+    return (
+        wsi_name,
+        image_name,
+        patch_number,
+        cell_features,
+        cell_ids,
+        cell_locations,
+        cell_sizes,
+        original_feature_dim,
+    )
 
 
 def extract_features_for_patch_from_cells(args):
-    """Extract raw UNI features for a patch using WSI-level JSON cells, using batched inference."""
-    image_path, cells, model_name, processed_log, patch_coords, infer_batch_size = args
+    """Extract raw features for a patch using WSI-level JSON cells."""
+    image_path, cells, model_name, patch_coords, infer_batch_size = args
+
     image_name = os.path.splitext(os.path.basename(image_path))[0]
     wsi_name = os.path.basename(os.path.dirname(image_path))
     patch_number = image_name.split("_patch_")[-1] if "_patch_" in image_name else "unknown"
@@ -478,8 +548,8 @@ def extract_features_for_patch_from_cells(args):
         )
 
         preprocess = get_preprocess_cached()
-        CUDA_AVAILABLE = gpu_enabled and device_id is not None
-        device = torch.device(f"cuda:{device_id}") if CUDA_AVAILABLE else torch.device("cpu")
+        cuda_ok = gpu_enabled and device_id is not None
+        device = torch.device(f"cuda:{device_id}") if cuda_ok else torch.device("cpu")
 
         cell_tensors = []
         cell_meta = []
@@ -523,7 +593,7 @@ def extract_features_for_patch_from_cells(args):
                     continue
 
                 cell_pil = Image.fromarray(masked_cell).convert("RGB")
-                input_tensor = preprocess(cell_pil)  # [3, 224, 224]
+                input_tensor = preprocess(cell_pil)
 
                 if input_tensor.ndim != 3:
                     raise ValueError(
@@ -547,7 +617,6 @@ def extract_features_for_patch_from_cells(args):
                     f"[CELL ERROR][WSI JSON] image={image_name}, cell_id={cell.get('id', 'unknown')}, error={repr(e)}"
                 )
                 logging.error(traceback.format_exc())
-                print(f"[CELL ERROR][WSI JSON] image={image_name}, cell_id={cell.get('id', 'unknown')}, error={repr(e)}")
                 continue
 
         cell_features, cell_ids, cell_locations, cell_sizes = [], [], [], []
@@ -561,13 +630,13 @@ def extract_features_for_patch_from_cells(args):
 
             batch_tensor = torch.stack(batch_tensors, dim=0)
 
-            if CUDA_AVAILABLE:
+            if cuda_ok:
                 batch_tensor = batch_tensor.pin_memory().to(device, non_blocking=True)
 
-            batch_features = run_uni_feature_extraction_batch(
+            batch_features = run_feature_extraction_batch(
                 model=model,
                 input_tensor=batch_tensor,
-                cuda_available=CUDA_AVAILABLE,
+                cuda_available=cuda_ok,
                 device_id=device_id,
             )
 
@@ -576,9 +645,6 @@ def extract_features_for_patch_from_cells(args):
                 cell_ids.append(cid)
                 cell_locations.append(loc)
                 cell_sizes.append(size)
-
-        with open(processed_log, "a") as f:
-            f.write(f"{image_path}\n")
 
         logging.info(f"Completed patch, WSI-level JSON mode: {image_name}, extracted {len(cell_features)} cells")
 
@@ -589,10 +655,26 @@ def extract_features_for_patch_from_cells(args):
         print(traceback.format_exc())
         raise
 
-    return wsi_name, image_name, patch_number, cell_features, cell_ids, cell_locations, cell_sizes, original_feature_dim
+    return (
+        wsi_name,
+        image_name,
+        patch_number,
+        cell_features,
+        cell_ids,
+        cell_locations,
+        cell_sizes,
+        original_feature_dim,
+    )
 
-
-def check_wsi_feature_file_integrity(wsi_name, output_folder, min_file_size_mb=1.0, min_cells_threshold=10):
+# --------------------------------------------------------------------------
+# Output integrity
+# --------------------------------------------------------------------------
+def check_wsi_feature_file_integrity(
+    wsi_name,
+    output_folder,
+    min_file_size_mb=1.0,
+    min_cells_threshold=10,
+):
     """Check whether a WSI feature Parquet file looks complete and usable."""
     output_path = os.path.join(output_folder, f"{wsi_name}_features.parquet")
 
@@ -629,24 +711,27 @@ def check_wsi_feature_file_integrity(wsi_name, output_folder, min_file_size_mb=1
     logging.info(f"[INTEGRITY] {wsi_name}: integrity OK, rows={num_rows}, size={file_size_mb:.2f} MB")
     return True
 
-
+# --------------------------------------------------------------------------
+# Main WSI processing
+# --------------------------------------------------------------------------
 def process_wsi(
     wsi_name,
     wsi_path,
     json_folder,
     mat_folder,
     output_folder,
-    model_name,
+    feature_backend="uni",
     pca_components=None,
     chunk_size=100,
-    force_reprocess=False,
     infer_batch_size=64,
 ):
     """
     Process all patches for a single WSI and save one Parquet file.
 
-    PCA has been removed.
-    The saved feature columns are raw UNI features, usually 1024 dimensions.
+    Important:
+    - No processed_patches.log is used.
+    - A WSI either finishes completely and is written successfully, or it fails.
+    - If it fails, it is NOT marked completed.
     """
     print(f"\n{'=' * 60}")
     print(f"Processing WSI: {wsi_name}")
@@ -682,15 +767,6 @@ def process_wsi(
     total_patches = len(image_files)
     print(f"Total patches: {total_patches}")
 
-    processed_log = os.path.join(output_folder, "processed_patches.log")
-    processed_patches = set()
-
-    if not force_reprocess and os.path.exists(processed_log):
-        with open(processed_log, "r") as f:
-            processed_patches = set(line.strip() for line in f)
-    elif force_reprocess:
-        print(f"   Forcing reprocess of all patches for {wsi_name}")
-
     args_list = []
 
     if use_wsi_level_json:
@@ -722,10 +798,6 @@ def process_wsi(
 
         for image_file in image_files:
             image_path = os.path.join(wsi_path, image_file)
-
-            if image_path in processed_patches:
-                continue
-
             coords = patch_coords_map.get(image_file)
 
             if not coords:
@@ -737,7 +809,8 @@ def process_wsi(
             if not cells:
                 continue
 
-            args_list.append((image_path, cells, model_name, processed_log, coords, infer_batch_size))
+            args_list.append((image_path, cells, feature_backend, coords, infer_batch_size))
+
     else:
         for image_file in image_files:
             image_path = os.path.join(wsi_path, image_file)
@@ -748,20 +821,14 @@ def process_wsi(
                 logging.warning(f"Missing json or mat for {image_file} in {wsi_name}, skipped.")
                 continue
 
-            if image_path not in processed_patches:
-                args_list.append((image_path, json_path, mat_path, model_name, processed_log, infer_batch_size))
+            args_list.append((image_path, json_path, mat_path, feature_backend, infer_batch_size))
 
     if not args_list:
-        print(f"All patches already processed for {wsi_name}")
-        logging.info(f"No patches to process for {wsi_name} or all already processed.")
+        print(f"No valid patches to process for {wsi_name}")
+        logging.info(f"No valid patches to process for {wsi_name}")
+        return True
 
-        if check_wsi_feature_file_integrity(wsi_name, output_folder):
-            return True
-
-        print(f"No new patches, but feature file may be incomplete; will retry next run: {wsi_name}")
-        return False
-
-    print(f"Processing {len(args_list)} new patches...")
+    print(f"Processing {len(args_list)} patches...")
     print(f"Inference batch size: {infer_batch_size}")
 
     all_features = []
@@ -773,7 +840,6 @@ def process_wsi(
 
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
     cpu_cap = cpu_count()
-
     if cpu_cap is None:
         cpu_cap = psutil.cpu_count(logical=True) or 1
 
@@ -816,7 +882,7 @@ def process_wsi(
                     chunksize=max(1, chunk_size // max(1, worker_count)),
                 ),
                 total=len(args_list),
-                desc="Extracting UNI Features",
+                desc=f"Extracting {feature_backend} Features",
             ):
                 if len(cell_features) == 0:
                     continue
@@ -838,80 +904,134 @@ def process_wsi(
 
     print(f"\nTotal cells extracted: {total_cells:,}")
 
-    if all_features:
-        print("Keeping raw UNI features without PCA...")
-
-        raw_features = np.asarray(all_features)
-
-        if raw_features.ndim != 2:
-            raw_features = np.vstack([np.asarray(feat).reshape(1, -1) for feat in all_features])
-
-        feature_dim = raw_features.shape[1]
-
-        print("UNI features kept:")
-        print(f"   Original UNI feature dimensions: {feature_dim}")
-        print(f"   Expected UNI dimensions: {ORIGINAL_FEATURE_DIM}")
-
-        wsi_data = []
-
-        for image_name, patch_number, feat, cell_id, loc, size in zip(
-            image_names_all,
-            patch_numbers_all,
-            raw_features,
-            cell_ids_all,
-            cell_locations_all,
-            cell_sizes_all,
-        ):
-            unique_id = f"{wsi_name}_{image_name}_cell_{cell_id}"
-            wsi_data.append(
-                [unique_id, image_name, cell_id, loc[0], loc[1], size[0], size[1]] + feat.tolist()
-            )
-
-        feature_cols = [f"feature_{i}" for i in range(feature_dim)]
-        columns = ["unique_id", "image_name", "cell_id", "x", "y", "area", "perimeter"] + feature_cols
-
-        df = pd.DataFrame(wsi_data, columns=columns)
-        output_path = os.path.join(output_folder, f"{wsi_name}_features.parquet")
-
-        try:
-            df.to_parquet(output_path, engine="pyarrow", compression="snappy", index=False)
-        except Exception as e:
-            logging.error(f"Error saving parquet for {wsi_name}: {repr(e)}")
-            logging.error(traceback.format_exc())
-            print(f"Error saving parquet for {wsi_name}: {repr(e)}")
-            return False
-
-        print("\nResults saved:")
-        print(f"   File: {output_path}")
-        print(f"   Cells: {len(wsi_data):,}")
-        print(f"   Features per cell: {feature_dim}")
-        print(f"   File size: {os.path.getsize(output_path) / 1024 / 1024:.2f} MB")
-
-        logging.info(
-            f"UNI features for {wsi_name} saved: {len(wsi_data):,} cells, {feature_dim} features"
-        )
-
+    if not all_features:
+        logging.info(f"No data to save for WSI {wsi_name}")
+        print(f"No data to save for WSI {wsi_name}")
         return True
 
-    logging.info(f"No data to save for WSI {wsi_name}")
-    print(f"No data to save for WSI {wsi_name}")
+    raw_features = np.asarray(all_features)
+
+    if raw_features.ndim != 2:
+        raw_features = np.vstack([np.asarray(feat).reshape(1, -1) for feat in all_features])
+
+    feature_dim_before = raw_features.shape[1]
+
+    if pca_components is not None:
+        print(f"Applying PCA (target: {pca_components} components)...")
+
+        n_samples = raw_features.shape[0]
+        effective_components = min(pca_components, n_samples, feature_dim_before)
+
+        if effective_components < 1:
+            reduced_features = raw_features
+            final_feature_dim = feature_dim_before
+            explained_variance_ratio = 1.0
+            print("Insufficient samples for PCA, using original features")
+        else:
+            pca = PCA(n_components=effective_components)
+            reduced_features = pca.fit_transform(raw_features)
+            final_feature_dim = effective_components
+            explained_variance_ratio = float(pca.explained_variance_ratio_.sum())
+
+            print("PCA completed:")
+            print(f"   Original dimensions: {feature_dim_before}")
+            print(f"   Reduced dimensions: {final_feature_dim}")
+            print(f"   Explained variance ratio: {explained_variance_ratio:.4f} ({explained_variance_ratio * 100:.2f}%)")
+
+            top_components = min(10, len(pca.explained_variance_ratio_))
+            print(f"   Top {top_components} components:")
+            for i in range(top_components):
+                print(f"     PC{i+1}: {pca.explained_variance_ratio_[i]:.4f} ({pca.explained_variance_ratio_[i] * 100:.2f}%)")
+    else:
+        reduced_features = raw_features
+        final_feature_dim = feature_dim_before
+        explained_variance_ratio = None
+        print("Keeping raw features without PCA...")
+        print(f"   Feature dimensions: {final_feature_dim}")
+
+    wsi_data = []
+
+    for image_name, patch_number, feat, cell_id, loc, size in zip(
+        image_names_all,
+        patch_numbers_all,
+        reduced_features,
+        cell_ids_all,
+        cell_locations_all,
+        cell_sizes_all,
+    ):
+        unique_id = f"{wsi_name}_{image_name}_cell_{cell_id}"
+        wsi_data.append(
+            [unique_id, image_name, cell_id, loc[0], loc[1], size[0], size[1]] + feat.tolist()
+        )
+
+    feature_cols = [f"feature_{i}" for i in range(final_feature_dim)]
+    columns = ["unique_id", "image_name", "cell_id", "x", "y", "area", "perimeter"] + feature_cols
+
+    df = pd.DataFrame(wsi_data, columns=columns)
+    output_path = os.path.join(output_folder, f"{wsi_name}_features.parquet")
+    tmp_output_path = output_path + ".tmp"
+
+    try:
+        df.to_parquet(tmp_output_path, engine="pyarrow", compression="snappy", index=False)
+        os.replace(tmp_output_path, output_path)
+    except Exception as e:
+        logging.error(f"Error saving parquet for {wsi_name}: {repr(e)}")
+        logging.error(traceback.format_exc())
+        print(f"Error saving parquet for {wsi_name}: {repr(e)}")
+
+        try:
+            if os.path.exists(tmp_output_path):
+                os.remove(tmp_output_path)
+        except Exception:
+            pass
+
+        return False
+
+    print("\nResults saved:")
+    print(f"   File: {output_path}")
+    print(f"   Cells: {len(wsi_data):,}")
+    print(f"   Features per cell: {final_feature_dim}")
+    print(f"   File size: {os.path.getsize(output_path) / 1024 / 1024:.2f} MB")
+
+    if explained_variance_ratio is None:
+        logging.info(
+            f"{feature_backend} features for {wsi_name} saved: {len(wsi_data):,} cells, "
+            f"{final_feature_dim} features (raw, no PCA)"
+        )
+    else:
+        logging.info(
+            f"{feature_backend} features for {wsi_name} saved: {len(wsi_data):,} cells, "
+            f"{final_feature_dim} PCA features, variance explained: {explained_variance_ratio:.4f}"
+        )
+
     return True
 
-
+# --------------------------------------------------------------------------
+# Batch driver
+# --------------------------------------------------------------------------
 def batch_extract_features(
     image_folder,
     json_folder,
     mat_folder,
     output_folder,
-    model_name="uni",
+    feature_backend="uni",
     pca_components=None,
     chunk_size=100,
     infer_batch_size=64,
 ):
-    """Process all WSIs and manage the extraction process."""
+    """
+    Process all WSIs and manage the extraction process.
+
+    Important behavior:
+    - Only records completed WSI in processed_wsi.log
+    - Does NOT use processed_patches.log
+    - If a WSI fails halfway, it is not recorded and will be fully retried next run
+    """
     elevate_process_priority()
 
-    logical_cpus = psutil.cpu_count(logical=True) or cpu_count() or 1
+    feature_backend = feature_backend.lower()
+    if feature_backend not in {"uni", "dinov3"}:
+        raise ValueError(f"Unsupported feature_backend: {feature_backend}. Expected 'uni' or 'dinov3'.")
 
     try:
         torch.set_num_threads(1)
@@ -920,18 +1040,39 @@ def batch_extract_features(
         pass
 
     print(f"\n{'=' * 80}")
-    print("UNI Feature Extraction Pipeline")
+    print("Feature Extraction Pipeline")
     print(f"{'=' * 80}")
     print(f"Image folder: {image_folder}")
     print(f"JSON folder: {json_folder}")
     print(f"MAT folder: {mat_folder}")
     print(f"Output folder: {output_folder}")
-    print(f"Model: {model_name}")
-    print("PCA: disabled, raw UNI features will be saved")
+    print(f"Feature backend: {feature_backend}")
+    print(f"PCA components: {pca_components}")
     print(f"Chunk size: {chunk_size}")
     print(f"Infer batch size: {infer_batch_size}")
-    print(f"UNI model path: {UNI_MODEL_PATH}")
-    print(f"Logical CPUs detected: {logical_cpus}")
+    print(f"HF endpoint: {os.environ.get('HF_ENDPOINT')}")
+    print(f"DINOv3 available flag: {DINOV3_AVAILABLE}")
+
+    print(f"PyTorch version: {torch.__version__}")
+    logging.info(f"PyTorch version: {torch.__version__}")
+
+    cuda_available = torch.cuda.is_available()
+    print(f"CUDA available: {cuda_available}")
+    logging.info(f"CUDA available: {cuda_available}")
+
+    if cuda_available:
+        gpu_count = torch.cuda.device_count()
+        print(f"Detected {gpu_count} CUDA device(s).")
+        logging.info(f"Detected {gpu_count} CUDA device(s).")
+
+        for gpu_idx in range(gpu_count):
+            gpu_name = torch.cuda.get_device_name(gpu_idx)
+            print(f"GPU {gpu_idx}: {gpu_name}")
+            logging.info(f"GPU {gpu_idx}: {gpu_name}")
+
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     os.makedirs(output_folder, exist_ok=True)
 
@@ -940,10 +1081,9 @@ def batch_extract_features(
     processed_wsi = set()
     if os.path.exists(processed_wsi_log):
         with open(processed_wsi_log, "r") as f:
-            processed_wsi = set(line.strip() for line in f)
+            processed_wsi = set(line.strip() for line in f if line.strip())
 
-    force_reprocess_wsi = set()
-
+    # Recheck integrity of previously completed WSI outputs
     if processed_wsi:
         print("\nChecking integrity of previously processed WSIs ...")
         still_ok = set()
@@ -954,11 +1094,9 @@ def batch_extract_features(
             if ok:
                 still_ok.add(name)
             else:
-                print(f"   Detected incomplete/corrupted output: {name} -> will reprocess")
-                force_reprocess_wsi.add(name)
+                print(f"   Detected incomplete/corrupted output: {name} -> removing from completed set")
 
                 out_path = os.path.join(output_folder, f"{name}_features.parquet")
-
                 if os.path.exists(out_path):
                     try:
                         os.remove(out_path)
@@ -967,6 +1105,11 @@ def batch_extract_features(
                         print(f"   Failed to delete old feature file: {e}")
 
         processed_wsi = still_ok
+
+        # Rewrite processed_wsi.log to keep it clean and accurate
+        with open(processed_wsi_log, "w") as f:
+            for name in sorted(processed_wsi):
+                f.write(f"{name}\n")
 
     wsi_names = [
         d for d in os.listdir(image_folder)
@@ -1001,10 +1144,9 @@ def batch_extract_features(
             json_folder=json_folder,
             mat_folder=mat_folder,
             output_folder=output_folder,
-            model_name=model_name,
-            pca_components=None,
+            feature_backend=feature_backend,
+            pca_components=pca_components,
             chunk_size=chunk_size,
-            force_reprocess=(wsi_name in force_reprocess_wsi),
             infer_batch_size=infer_batch_size,
         )
 
@@ -1014,27 +1156,29 @@ def batch_extract_features(
         else:
             print(
                 f"Warning: WSI {wsi_name} failed in this run; "
-                "not writing processed_wsi.log. It will be retried next time."
+                f"it is NOT marked completed and will be fully retried next time."
             )
 
     print("\nAll processing completed!")
 
-
+# --------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------
 if __name__ == "__main__":
     set_start_method("spawn", force=True)
 
-    image_folder = "/data/hdd2/yujk/TCGA_patches/PRAD"
-    json_folder = "/data/hdd2/yujk/hovernet_output/PRAD"
-    mat_folder = "/data/hdd2/yujk/hovernet_output/PRAD"
-    output_folder = "/data/hdd2/shanggk/BiTro/demo_data/Feature/Bulk/PRAD"
+    image_folder = "/data/hdd2/yujk/TCGA_patches/LIHC"
+    json_folder = "/data/hdd2/yujk/hovernet_output/LIHC"
+    mat_folder = "/data/hdd2/yujk/hovernet_output/LIHC"
+    output_folder = "/data/hdd2/shanggk/BiTro/demo_data/Feature/Bulk/LIHC"
 
     batch_extract_features(
         image_folder=image_folder,
         json_folder=json_folder,
         mat_folder=mat_folder,
         output_folder=output_folder,
-        model_name="uni",
-        pca_components=None,
+        feature_backend="uni",   # "uni" or "dinov3", default recommended: "uni"
+        pca_components=None,     # None = save raw features; e.g. 128 = PCA to 128 dims
         chunk_size=100,
-        infer_batch_size=64,   # 先试 64，不够再调 96 / 128
+        infer_batch_size=64,
     )
